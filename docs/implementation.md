@@ -1,9 +1,9 @@
 # Implementation Plan — AI Ghostwriter Realtime Assistant
 
-## 0. Outstanding Planning Decisions
-- **Long-form model snapshot**: Default to OpenAI `gpt-5-mini` (Responses API) for background drafting; define fallback if latency or quality gaps emerge.
-- **Audio UI scope**: Commit to state-of-the-art experience—device selection, audio level metering, VAD metadata usage, OpenAI background suppression—ensure feasibility with target browsers/devices.
-- **better-auth & Autumn sequencing**: Defer integration until core authoring, collaboration, and export features are complete and stable.
+## 0. Planning Summary
+- **Long-form model snapshot**: Default to OpenAI `gpt-5-mini` (Responses API) for background drafting; fall back to `gpt-4.1-mini` if latency/quality regress.
+- **Audio UI scope**: Deliver state-of-the-art UX—desktop/mobile device selection, audio level meters, VAD indicators from OpenAI `server_vad` events, optional `input_audio_noise_reduction` configuration, and no raw-audio persistence (transcripts only). Browser/device support verified via WebRTC APIs (`MediaDevices.enumerateDevices`, `HTMLMediaElement.setSinkId`) and Realtime event model.
+- **better-auth & Autumn sequencing**: Integrate only after Milestones 1–2 are production-stable; roll out better-auth first, then Autumn/Stripe tiers.
 
 ## 1. Foundational Setup (Shared Groundwork)
 1. Initialize Next.js 15.5 App Router project with TypeScript, ESLint, testing baseline.
@@ -16,8 +16,8 @@
 ## 2. Core Realtime Experience (Milestone 1)
 - **Feature Slice F1** — Realtime Session Shell
   - Implement WebRTC handshake with OpenAI Realtime API (client secret endpoint + browser client).
-  - Build advanced audio controls: device picker, live level meters, VAD indicators, toggle for OpenAI background suppression.
-  - Stream transcripts in real time and persist speaker-separated text to Convex (`sessions`, `messages`); no raw audio storage.
+  - Build advanced audio controls: input/output device pickers using `MediaDevices.enumerateDevices()` + `selectAudioOutput()`/`setSinkId()`, live level meters, VAD indicators sourced from `input_audio_buffer.speech_*` events, toggle for OpenAI `input_audio_noise_reduction` profiles.
+  - Stream transcripts in real time (using OpenAI transcription events) and persist speaker-separated text to Convex (`sessions`, `messages`); no raw audio storage.
 
 - **Feature Slice F2** — Project Definition Intake
   - Build UI flow for guided intake (project concept, outcomes, target audience, timeline, materials, budget, comms prefs).
@@ -56,5 +56,6 @@
 
 ## 7. Documentation & Knowledge Base
 - Keep `docs/` updated with architectural decisions, API usage, prompt templates.
+- Reference `docs/research/audio-realtime-capabilities.md` for VAD/noise suppression and device-selection guidance.
 - Add developer onboarding checklist referencing PRD, implementation plan, and schematics.
 - Capture lessons learned from each milestone to inform parallel agent assignments.

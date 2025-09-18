@@ -40,7 +40,7 @@ Build a voice-first ghostwriting companion that captures a user’s spoken input
 
 ### 7.2 Realtime Conversation Experience
 - Use WebRTC with OpenAI `gpt-realtime` for sub-second round trips. Must support microphone capture, AI audio playback, and streaming transcripts persisted per speaker (no raw audio storage).
-- Offer state-of-the-art voice UX: device selection (input/output), live audio level meters, voice activity detection leveraging API VAD metadata, and optional background suppression/noise reduction via OpenAI capabilities.
+- Offer state-of-the-art voice UX: device selection (input/output), live audio level meters, voice activity detection leveraging `server_vad` metadata, and optional background suppression/noise reduction via OpenAI `input_audio_noise_reduction` profiles.
 - Render dual transcripts (User / AI) with timestamped entries; allow the user to tap to hear segments again.
 - Provide simple voice cues + visual prompts when AI needs response (e.g., highlight questions).
 - Allow manual text replies via quick type input (fallback for noisy environments).
@@ -139,3 +139,4 @@ Build a voice-first ghostwriting companion that captures a user’s spoken input
 - `docs/research/better-auth.md`: Authentication library capabilities and Next.js example.
 - `docs/research/autumn.md`: Stripe subscription orchestration with Autumn setup steps.
 - `docs/research/ghostwriting-best-practices.md`: Human ghostwriter workflows, interview frameworks, and voice-capture tactics.
+- `docs/research/audio-realtime-capabilities.md`: Realtime audio feature matrix, VAD/noise-reduction guidance, and browser/device requirements.

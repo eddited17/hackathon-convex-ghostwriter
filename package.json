@@ -1,0 +1,30 @@
+{
+  "name": "hackathon-convex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "15.5.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.5.10",
+    "convex": "^1.15.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "eslint": "^9.8.0",
+    "eslint-config-next": "15.5.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.2"
+  }
+}
