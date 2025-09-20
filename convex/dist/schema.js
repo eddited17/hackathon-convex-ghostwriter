@@ -41,7 +41,9 @@ exports.default = (0, server_1.defineSchema)({
         endedAt: values_1.v.optional(values_1.v.number()),
         realtimeSessionId: values_1.v.optional(values_1.v.string()),
         summary: values_1.v.optional(values_1.v.string()),
-        status: values_1.v.string()
+        status: values_1.v.string(),
+        inputAudioNoiseReduction: values_1.v.optional(values_1.v.union(values_1.v.literal("default"), values_1.v.literal("near_field"), values_1.v.literal("far_field"))),
+        updatedAt: values_1.v.optional(values_1.v.number())
     }).index("by_project", ["projectId"]),
     messages: (0, server_1.defineTable)({
         sessionId: values_1.v.id("sessions"),
