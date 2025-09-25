@@ -20,7 +20,7 @@ const randomId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
 
-type SessionStatus =
+export type SessionStatus =
   | "idle"
   | "requesting-permissions"
   | "connecting"
@@ -43,8 +43,13 @@ type ServerEventLog = {
 
 type SessionBootstrap = {
   sessionId: Id<"sessions">;
-  projectId: Id<"projects">;
+  projectId: Id<"projects"> | null;
   startedAt: number;
+};
+
+export type StartSessionOptions = {
+  projectId?: Id<"projects">;
+  deferProject?: boolean;
 };
 
 type ServerMessage = {
@@ -75,7 +80,7 @@ export interface RealtimeSessionState {
   status: SessionStatus;
   statusMessage: string | null;
   isConnected: boolean;
-  startSession: () => Promise<void>;
+  startSession: (options?: StartSessionOptions) => Promise<void>;
   stopSession: (reason?: string) => Promise<void>;
   refreshDevices: () => Promise<void>;
   inputDevices: MediaDeviceInfo[];
@@ -97,6 +102,9 @@ export interface RealtimeSessionState {
   error: string | null;
   sendTextMessage: (message: string, options?: ManualMessageOptions) => Promise<void>;
   registerAudioElement: (element: HTMLAudioElement | null) => void;
+  sessionRecord: SessionBootstrap | null;
+  assignProjectToSession: (projectId: Id<"projects">) => Promise<void>;
+  resolveMessageId: (transcriptId: string) => Id<"messages"> | null;
 }
 
 const extractText = (value: unknown): string | null => {
@@ -169,6 +177,7 @@ export function useRealtimeSession(): RealtimeSessionState {
   const userFragmentsRef = useRef<Map<string, string>>(new Map());
   const assistantFragmentsRef = useRef<Map<string, string>>(new Map());
   const persistedMessageIdsRef = useRef<Set<string>>(new Set());
+  const transcriptMessageIdsRef = useRef<Map<string, Id<"messages">>>(new Map());
   const completeOnceRef = useRef(false);
 
   const createSessionMutation = useMutation(api.sessions.createSession);
@@ -177,6 +186,9 @@ export function useRealtimeSession(): RealtimeSessionState {
   );
   const completeSessionMutation = useMutation(api.sessions.completeSession);
   const setNoiseProfileMutation = useMutation(api.sessions.setNoiseProfile);
+  const assignProjectMutation = useMutation(
+    api.sessions.assignProjectContext,
+  );
   const appendMessageMutation = useMutation(api.messages.appendMessage);
 
   const logConnection = useCallback((message: string) => {
@@ -204,6 +216,7 @@ export function useRealtimeSession(): RealtimeSessionState {
     userFragmentsRef.current.clear();
     assistantFragmentsRef.current.clear();
     persistedMessageIdsRef.current.clear();
+    transcriptMessageIdsRef.current.clear();
     setPartialUserTranscript(null);
     setPartialAssistantTranscript(null);
   }, []);
@@ -295,13 +308,16 @@ export function useRealtimeSession(): RealtimeSessionState {
 
       if (sessionRecord?.sessionId) {
         try {
-          await appendMessageMutation({
+          const persisted = await appendMessageMutation({
             sessionId: sessionRecord.sessionId,
             speaker,
             transcript: text,
             timestamp: message.timestamp,
             eventId: key,
           });
+          if (persisted?.messageId) {
+            transcriptMessageIdsRef.current.set(key, persisted.messageId);
+          }
         } catch (persistError) {
           console.error("Failed to persist transcript", persistError);
         }
@@ -462,7 +478,7 @@ export function useRealtimeSession(): RealtimeSessionState {
     setVoiceActivity({ user: false, assistant: false });
   }, [resetFragments, resetMonitors]);
 
-  const startSession = useCallback(async () => {
+  const startSession = useCallback(async (options?: StartSessionOptions) => {
     if (status === "connecting" || status === "connected") return;
     if (!audioElementRef.current) {
       setError("Audio element not ready");
@@ -504,9 +520,16 @@ export function useRealtimeSession(): RealtimeSessionState {
 
       const createdSession = await createSessionMutation({
         noiseProfile: noiseReduction,
+        projectId: options?.projectId,
+        deferProject: options?.deferProject,
       });
       completeOnceRef.current = false;
-      setSessionRecord(createdSession);
+      setSessionRecord({
+        sessionId: createdSession.sessionId,
+        projectId:
+          createdSession.projectId ?? options?.projectId ?? null,
+        startedAt: createdSession.startedAt,
+      });
 
       const secretResponse = await fetch("/api/realtime/secret", {
         method: "POST",
@@ -744,6 +767,36 @@ export function useRealtimeSession(): RealtimeSessionState {
     [logConnection],
   );
 
+  const assignProjectToSession = useCallback(
+    async (projectId: Id<"projects">) => {
+      if (!sessionRecord?.sessionId) return;
+      try {
+        await assignProjectMutation({
+          sessionId: sessionRecord.sessionId,
+          projectId,
+        });
+        setSessionRecord((previous) =>
+          previous
+            ? {
+                ...previous,
+                projectId,
+              }
+            : previous,
+        );
+      } catch (assignError) {
+        console.error("Failed to assign project to session", assignError);
+        throw assignError;
+      }
+    },
+    [assignProjectMutation, sessionRecord],
+  );
+
+  const resolveMessageId = useCallback(
+    (transcriptId: string) =>
+      transcriptMessageIdsRef.current.get(transcriptId) ?? null,
+    [],
+  );
+
   useEffect(() => {
     if (status !== "connected") return;
     if (!dataChannelRef.current) return;
@@ -835,9 +888,13 @@ export function useRealtimeSession(): RealtimeSessionState {
       error,
       sendTextMessage,
       registerAudioElement,
+      sessionRecord,
+      assignProjectToSession,
+      resolveMessageId,
     }),
     [
       assistantLevel,
+      assignProjectToSession,
       connectionLog,
       error,
       inputDevices,
@@ -845,6 +902,7 @@ export function useRealtimeSession(): RealtimeSessionState {
       outputDevices,
       partialAssistantTranscript,
       partialUserTranscript,
+      sessionRecord,
       refreshDevices,
       registerAudioElement,
       selectInputDevice,
@@ -861,6 +919,7 @@ export function useRealtimeSession(): RealtimeSessionState {
       microphoneLevel,
       serverEvents,
       setNoiseReduction,
+      resolveMessageId,
     ],
   );
 }

@@ -27,4 +27,8 @@ pnpm-debug.log*
 
 # Convex generated files
 convex/_generated/
+!convex/_generated/
+!convex/_generated/api.ts
+!convex/_generated/dataModel.ts
+!convex/_generated/server.ts
 convex/dist/

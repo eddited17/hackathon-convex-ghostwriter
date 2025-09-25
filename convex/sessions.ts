@@ -1,7 +1,10 @@
 import { mutation } from "./_generated/server";
-import type { Doc, Id } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
+
+import {
+  ensureLocalUser,
+  ensureSandboxProject,
+} from "./utils";
 
 const NOISE_PROFILES = v.union(
   v.literal("default"),
@@ -9,75 +12,26 @@ const NOISE_PROFILES = v.union(
   v.literal("far_field"),
 );
 
-const SANDBOX_EXTERNAL_ID = "local-dev";
-const SANDBOX_PROJECT_TITLE = "Realtime Session Sandbox";
-
-async function ensureLocalUser(
-  ctx: MutationCtx,
-  now: number,
-): Promise<Doc<"users">> {
-  const existing = await ctx.db
-    .query("users")
-    .withIndex("by_external_id", (q) => q.eq("externalId", SANDBOX_EXTERNAL_ID))
-    .unique();
-  if (existing) return existing;
-
-  const userId = await ctx.db.insert("users", {
-    externalId: SANDBOX_EXTERNAL_ID,
-    email: undefined,
-    displayName: "Ghostwriter Sandbox",
-    voicePreferences: undefined,
-    createdAt: now,
-  });
-  const user = await ctx.db.get(userId);
-  if (!user) {
-    throw new Error("Failed to load sandbox user after insert");
-  }
-  return user;
-}
-
-async function ensureSandboxProject(
-  ctx: MutationCtx,
-  ownerId: Id<"users">,
-  now: number,
-): Promise<Doc<"projects">> {
-  const existingProjects = await ctx.db
-    .query("projects")
-    .withIndex("by_owner", (q) => q.eq("ownerId", ownerId))
-    .collect();
-
-  const sandbox = existingProjects.find(
-    (project) => project.title === SANDBOX_PROJECT_TITLE,
-  );
-  if (sandbox) return sandbox;
-
-  const projectId = await ctx.db.insert("projects", {
-    ownerId,
-    title: SANDBOX_PROJECT_TITLE,
-    contentType: "sandbox",
-    goal: "Local realtime session experiments",
-    status: "active",
-    createdAt: now,
-    updatedAt: now,
-  });
-  const project = await ctx.db.get(projectId);
-  if (!project) {
-    throw new Error("Failed to load sandbox project after insert");
-  }
-  return project;
-}
-
 export const createSession = mutation({
   args: {
+    projectId: v.optional(v.id("projects")),
     noiseProfile: v.optional(NOISE_PROFILES),
+    deferProject: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const user = await ensureLocalUser(ctx, now);
-    const project = await ensureSandboxProject(ctx, user._id, now);
+    const shouldDefer = args.deferProject ?? false;
+
+    let assignedProjectId = args.projectId ?? null;
+
+    if (!assignedProjectId && !shouldDefer) {
+      const project = await ensureSandboxProject(ctx, user._id, now);
+      assignedProjectId = project._id;
+    }
 
     const sessionId = await ctx.db.insert("sessions", {
-      projectId: project._id,
+      projectId: assignedProjectId ?? undefined,
       startedAt: now,
       endedAt: undefined,
       realtimeSessionId: undefined,
@@ -89,7 +43,7 @@ export const createSession = mutation({
 
     return {
       sessionId,
-      projectId: project._id,
+      projectId: assignedProjectId,
       startedAt: now,
     };
   },
@@ -134,6 +88,19 @@ export const setNoiseProfile = mutation({
   handler: async (ctx, args) => {
     await ctx.db.patch(args.sessionId, {
       inputAudioNoiseReduction: args.noiseProfile,
+      updatedAt: Date.now(),
+    });
+  },
+});
+
+export const assignProjectContext = mutation({
+  args: {
+    sessionId: v.id("sessions"),
+    projectId: v.id("projects"),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.sessionId, {
+      projectId: args.projectId,
       updatedAt: Date.now(),
     });
   },
