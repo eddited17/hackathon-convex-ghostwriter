@@ -27,6 +27,7 @@ exports.default = (0, server_1.defineSchema)({
         timeline: values_1.v.string(),
         materialsInventory: values_1.v.string(),
         communicationPreferences: values_1.v.string(),
+        availability: values_1.v.string(),
         budgetRange: values_1.v.optional(values_1.v.string()),
         voiceGuardrails: values_1.v.optional(values_1.v.object({
             tone: values_1.v.optional(values_1.v.string()),
@@ -41,7 +42,8 @@ exports.default = (0, server_1.defineSchema)({
         endedAt: values_1.v.optional(values_1.v.number()),
         realtimeSessionId: values_1.v.optional(values_1.v.string()),
         summary: values_1.v.optional(values_1.v.string()),
-        status: values_1.v.string()
+        status: values_1.v.string(),
+        blueprintId: values_1.v.optional(values_1.v.id("projectBlueprints"))
     }).index("by_project", ["projectId"]),
     messages: (0, server_1.defineTable)({
         sessionId: values_1.v.id("sessions"),

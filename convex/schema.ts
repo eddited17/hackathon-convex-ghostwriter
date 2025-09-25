@@ -28,6 +28,7 @@ export default defineSchema({
     timeline: v.string(),
     materialsInventory: v.string(),
     communicationPreferences: v.string(),
+    availability: v.string(),
     budgetRange: v.optional(v.string()),
     voiceGuardrails: v.optional(
       v.object({
@@ -45,7 +46,8 @@ export default defineSchema({
     endedAt: v.optional(v.number()),
     realtimeSessionId: v.optional(v.string()),
     summary: v.optional(v.string()),
-    status: v.string()
+    status: v.string(),
+    blueprintId: v.optional(v.id("projectBlueprints"))
   }).index("by_project", ["projectId"]),
 
   messages: defineTable({
