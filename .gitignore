@@ -27,3 +27,4 @@ pnpm-debug.log*
 
 # Convex generated files
 convex/_generated/
+convex/dist/

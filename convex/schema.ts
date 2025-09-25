@@ -45,7 +45,15 @@ export default defineSchema({
     endedAt: v.optional(v.number()),
     realtimeSessionId: v.optional(v.string()),
     summary: v.optional(v.string()),
-    status: v.string()
+    status: v.string(),
+    inputAudioNoiseReduction: v.optional(
+      v.union(
+        v.literal("default"),
+        v.literal("near_field"),
+        v.literal("far_field")
+      )
+    ),
+    updatedAt: v.optional(v.number())
   }).index("by_project", ["projectId"]),
 
   messages: defineTable({
