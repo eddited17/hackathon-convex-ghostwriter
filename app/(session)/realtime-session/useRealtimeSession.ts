@@ -607,10 +607,11 @@ export function useRealtimeSession(): RealtimeSessionState {
         peerConnection.addTrack(track, mediaStream);
       });
 
-      const offer = await peerConnection.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: false,
-      });
+      if (peerConnection.getTransceivers().length === 0) {
+        peerConnection.addTransceiver("audio", { direction: "sendrecv" });
+      }
+
+      const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
 
       logConnection("Sending SDP offer to OpenAI");
@@ -687,11 +688,17 @@ export function useRealtimeSession(): RealtimeSessionState {
     [completeSessionMutation, sessionRecord, status, tearDownConnection],
   );
 
+  const stopSessionRef = useRef(stopSession);
+  useEffect(() => {
+    stopSessionRef.current = stopSession;
+  }, [stopSession]);
+
   useEffect(() => {
     return () => {
-      void stopSession();
+      const cleanup = stopSessionRef.current;
+      void cleanup();
     };
-  }, [stopSession]);
+  }, []);
 
   const selectInputDevice = useCallback(
     async (deviceId: string) => {
@@ -741,14 +748,18 @@ export function useRealtimeSession(): RealtimeSessionState {
     if (status !== "connected") return;
     if (!dataChannelRef.current) return;
     try {
-      dataChannelRef.current.send(
-        JSON.stringify({
-          type: "session.update",
-          session: {
-            input_audio_noise_reduction: noiseReduction,
-          },
-        }),
-      );
+      if (noiseReduction && noiseReduction !== "default") {
+        dataChannelRef.current.send(
+          JSON.stringify({
+            type: "session.update",
+            session: {
+              audio: {
+                input: { noise_reduction: { type: noiseReduction } },
+              },
+            },
+          }),
+        );
+      }
       if (sessionRecord?.sessionId) {
         void setNoiseProfileMutation({
           sessionId: sessionRecord.sessionId,

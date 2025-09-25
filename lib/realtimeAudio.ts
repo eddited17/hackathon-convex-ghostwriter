@@ -94,12 +94,24 @@ export class AudioLevelMonitor {
   }
 }
 
+const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+
+const parseIceServers = (): RTCIceServer[] => {
+  const raw = process.env.NEXT_PUBLIC_WEBRTC_ICE_SERVERS;
+  if (!raw) return DEFAULT_ICE_SERVERS;
+
+  const servers = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((urls) => ({ urls }));
+
+  return servers.length > 0 ? servers : DEFAULT_ICE_SERVERS;
+};
+
 export const createPeerConnection = () => {
   return new RTCPeerConnection({
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:global.stun.twilio.com:3478?transport=udp" },
-    ],
+    iceServers: parseIceServers(),
   });
 };
 

@@ -41,19 +41,24 @@ export async function POST(request: Request) {
   }
 
   const sessionConfig: Record<string, unknown> = {
-    session: {
-      type: "realtime",
-      model: DEFAULT_MODEL,
-      voice: payload.voice ?? DEFAULT_VOICE,
-      modalities: ["text", "audio"],
-      turn_detection: { type: "server_vad" },
+    type: "realtime",
+    model: DEFAULT_MODEL,
+    audio: {
+      output: {
+        voice: payload.voice ?? DEFAULT_VOICE,
+      },
     },
   };
 
   if (payload.noiseReduction && payload.noiseReduction !== "default") {
-    (sessionConfig.session as Record<string, unknown>).input_audio_noise_reduction =
-      payload.noiseReduction;
+    (sessionConfig.audio as Record<string, unknown>).input = {
+      noise_reduction: { type: payload.noiseReduction },
+    };
   }
+
+  const requestBody: Record<string, unknown> = {
+    session: sessionConfig,
+  };
 
   try {
     const response = await fetch(OPENAI_ENDPOINT, {
@@ -62,7 +67,7 @@ export async function POST(request: Request) {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(sessionConfig),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
