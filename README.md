@@ -49,12 +49,23 @@ For detailed milestones, refer to [`docs/implementation.md`](docs/implementation
 
 ## Realtime Session Shell
 
-The home page now boots a realtime session experience that connects the browser to OpenAI’s Realtime API while persisting transcripts to Convex.
+The workspace now opens on the Projects list (`/projects`), where you can launch realtime conversations that connect to OpenAI’s Realtime API while persisting transcripts to Convex.
 
 1. Ensure a Convex dev deployment is running locally (`npx convex dev`) and that `NEXT_PUBLIC_CONVEX_URL`/`CONVEX_DEPLOYMENT_URL` point to it.
 2. Populate `.env.local` with your OpenAI credentials and realtime preferences.
-3. Start the Next.js dev server with `npm run dev` and visit [http://localhost:3000](http://localhost:3000).
-4. Grant microphone access when prompted, pick input/output devices, and toggle the noise-reduction profile as needed.
+3. Start the Next.js dev server with `npm run dev` and visit [http://localhost:3000](http://localhost:3000). You’ll be redirected to `/projects`.
+4. Use **Start session** to begin the assistant. When prompted, grant microphone access, pick input/output devices, and toggle the noise-reduction profile as needed.
 5. Speak with the assistant or type a manual reply—transcripts stream live, VAD badges reflect server events, and messages are written into the `sessions`/`messages` Convex tables.
 
 If the connection drops, refresh the devices list and use “Start session” again; a fresh ephemeral secret will be generated automatically.
+
+## Project Intake & Blueprint Mode
+
+The project list doubles as the launchpad for guided intake:
+
+- **Existing project path:** choose any card or tell the assistant which project to reopen. The shell hydrates metadata, applies project context to the current session, and keeps the intake tooling available for follow-up questions.
+- **New project path:** from a blank session, say you want to start something new (or trigger the CTA). The assistant creates an `intake` project plus draft blueprint, then walks field-by-field through the schema while the “Blueprint fields” panel updates in realtime.
+- **Manual metadata edits:** title, content type, goal, and any blueprint text areas in the sidebar stay editable. Blur events sync changes back to Convex using the same tool plumbing as voice updates.
+- **Partial progress:** blueprint drafts are saved incrementally, so refreshing or rejoining later resumes where you left off.
+
+Task 03 will extend this foundation with a ghostwriting toolset, transcript anchors, and richer interview behavior—see [`docs/tasks/03-curiosity-voice-coaching.md`](docs/tasks/03-curiosity-voice-coaching.md) for the upcoming scope.
