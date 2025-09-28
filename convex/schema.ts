@@ -107,6 +107,11 @@ export default defineSchema({
     content: v.string(),
     version: v.number(),
     locked: v.boolean(),
+    status: v.union(
+      v.literal("drafting"),
+      v.literal("needs_detail"),
+      v.literal("complete"),
+    ),
     updatedAt: v.number()
   }).index("by_document", ["documentId", "order"]),
 
@@ -115,6 +120,7 @@ export default defineSchema({
     label: v.string(),
     status: v.union(v.literal("open"), v.literal("in_review"), v.literal("resolved")),
     createdAt: v.number(),
-    resolvedAt: v.optional(v.number())
+    resolvedAt: v.optional(v.number()),
+    noteId: v.optional(v.id("notes"))
   }).index("by_project", ["projectId"])
 });

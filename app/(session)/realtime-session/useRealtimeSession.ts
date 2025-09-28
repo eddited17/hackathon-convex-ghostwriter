@@ -20,7 +20,11 @@ import {
   findLanguageOption,
   type LanguageOption,
 } from "@/lib/languages";
-import { buildSessionInstructions } from "@/lib/realtimeInstructions";
+import {
+  buildSessionInstructions,
+  type SessionInstructionMode,
+  type SessionInstructionOptions,
+} from "@/lib/realtimeInstructions";
 
 const randomId = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -128,6 +132,9 @@ export interface RealtimeSessionState {
   ingestProjects: (
     entries: Array<{ project: ProjectDoc; blueprint: BlueprintDoc | null }>,
   ) => void;
+  instructionContext: InstructionContext;
+  updateInstructionContext: (updates: Partial<InstructionContext>) => void;
+  resetInstructionContext: () => void;
 }
 
 const extractText = (value: unknown): string | null => {
@@ -175,6 +182,22 @@ type ToolCallInvocation = {
   rawArguments?: unknown;
   responseId?: string | null;
 };
+
+type InstructionContext = {
+  mode: SessionInstructionMode;
+  blueprintSummary?: SessionInstructionOptions["blueprintSummary"];
+  draftingSnapshot?: SessionInstructionOptions["draftingSnapshot"];
+};
+
+type NoteTypeValue = "fact" | "story" | "style" | "voice" | "todo" | "summary";
+type TodoStatusValue = "open" | "in_review" | "resolved";
+type DocumentSectionStatus = "drafting" | "needs_detail" | "complete";
+
+const BLOCKED_TOOLS_IN_GHOSTWRITING = new Set([
+  "list_projects",
+  "create_project",
+  "assign_project_to_session",
+]);
 
 const parseToolCallArguments = (
   value: unknown,
@@ -404,6 +427,81 @@ const coerceIdString = (value: unknown): string | null => {
     return value.toString();
   }
   return null;
+};
+
+const NOTE_TYPE_VALUES = new Set<NoteTypeValue>([
+  "fact",
+  "story",
+  "style",
+  "voice",
+  "todo",
+  "summary",
+]);
+
+const TODO_STATUS_VALUES = new Set<TodoStatusValue>([
+  "open",
+  "in_review",
+  "resolved",
+]);
+
+const SECTION_STATUS_VALUES = new Set<DocumentSectionStatus>([
+  "drafting",
+  "needs_detail",
+  "complete",
+]);
+
+const coerceNoteTypeValue = (value: unknown): NoteTypeValue | null => {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase() as NoteTypeValue;
+  return NOTE_TYPE_VALUES.has(normalized) ? normalized : null;
+};
+
+const coerceTodoStatusValue = (value: unknown): TodoStatusValue | null => {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase() as TodoStatusValue;
+  return TODO_STATUS_VALUES.has(normalized) ? normalized : null;
+};
+
+const coerceSectionStatusValue = (
+  value: unknown,
+): DocumentSectionStatus | undefined => {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase() as DocumentSectionStatus;
+  return SECTION_STATUS_VALUES.has(normalized) ? normalized : undefined;
+};
+
+type DocumentEditSectionPayload = {
+  heading: string;
+  content: string;
+  status?: DocumentSectionStatus;
+  order?: number;
+};
+
+const coerceDocumentSectionsPayload = (
+  value: unknown,
+): DocumentEditSectionPayload[] => {
+  if (!Array.isArray(value)) return [];
+  const sections: DocumentEditSectionPayload[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const headingValue = coerceOptionalString(entry.heading);
+    if (typeof headingValue !== "string" || headingValue.length === 0) {
+      continue;
+    }
+    const contentValue = coerceOptionalString(entry.content);
+    const statusValue = coerceSectionStatusValue(entry.status);
+    const orderValue =
+      typeof entry.order === "number" && Number.isFinite(entry.order)
+        ? entry.order
+        : undefined;
+    sections.push({
+      heading: headingValue,
+      content: typeof contentValue === "string" ? contentValue : "",
+      status: statusValue,
+      order: orderValue,
+    });
+  }
+  return sections;
 };
 
 const findIdInValue = (
@@ -645,6 +743,8 @@ export function useRealtimeSession(): RealtimeSessionState {
   const [serverEvents, setServerEvents] = useState<ServerEventLog[]>([]);
   const [sessionRecord, setSessionRecord] =
     useState<SessionBootstrap | null>(null);
+  const [instructionContext, setInstructionContextState] =
+    useState<InstructionContext>({ mode: "intake" });
 
   const convex = useConvex();
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
@@ -680,6 +780,20 @@ export function useRealtimeSession(): RealtimeSessionState {
     [],
   );
 
+  const updateInstructionContext = useCallback(
+    (updates: Partial<InstructionContext>) => {
+      setInstructionContextState((previous) => ({
+        ...previous,
+        ...updates,
+      }));
+    },
+    [],
+  );
+
+  const resetInstructionContext = useCallback(() => {
+    setInstructionContextState({ mode: "intake" });
+  }, []);
+
   const createSessionMutation = useMutation(api.sessions.createSession);
   const updateRealtimeMutation = useMutation(
     api.sessions.updateRealtimeSessionId,
@@ -701,6 +815,12 @@ export function useRealtimeSession(): RealtimeSessionState {
     api.projects.syncBlueprintField,
   );
   const commitBlueprintMutation = useMutation(api.projects.commitBlueprint);
+  const recordTranscriptPointerMutation = useMutation(
+    api.projects.recordTranscriptPointer,
+  );
+  const createNoteMutation = useMutation(api.notes.createNote);
+  const updateTodoStatusMutation = useMutation(api.todos.updateStatus);
+  const applyDocumentEditsMutation = useMutation(api.documents.applyEdits);
 
 const resolveProjectId = useCallback(
   (args?: ToolCallArguments): string => {
@@ -1262,6 +1382,24 @@ const resolveProjectId = useCallback(
         return false;
       }
 
+      if (
+        instructionContext.mode === "ghostwriting" &&
+        BLOCKED_TOOLS_IN_GHOSTWRITING.has(name)
+      ) {
+        console.log(
+          `[realtime] tool:${name} blocked during ghostwriting mode`,
+          args,
+        );
+        const submitted = await submitToolResult({
+          tool: name,
+          tool_call_id: toolCallId,
+          response_id: responseId,
+          success: false,
+          error: `Tool ${name} is unavailable after drafting begins`,
+        });
+        return submitted;
+      }
+
       let result: unknown = null;
       let success = false;
       let errorMessage: string | undefined;
@@ -1444,6 +1582,189 @@ const resolveProjectId = useCallback(
             success = true;
             break;
           }
+          case "list_notes": {
+            console.log("[realtime] tool:list_notes", { args });
+            const projectId = resolveProjectId(args);
+            const limitValue =
+              typeof args.limit === "number"
+                ? clampInteger(args.limit, 20, 1, 100)
+                : undefined;
+            const notes = await convex.query(api.notes.listForProject, {
+              projectId: projectId as Id<"projects">,
+              limit: limitValue,
+            });
+            result = notes;
+            success = true;
+            break;
+          }
+          case "list_todos": {
+            console.log("[realtime] tool:list_todos", { args });
+            const projectId = resolveProjectId(args);
+            const todos = await convex.query(api.todos.listForProject, {
+              projectId: projectId as Id<"projects">,
+            });
+            result = todos;
+            success = true;
+            break;
+          }
+          case "create_note": {
+            console.log("[realtime] tool:create_note", { args });
+            const projectId = resolveProjectId(args) as Id<"projects">;
+            const noteTypeValue = coerceNoteTypeValue(
+              (args.noteType ?? args.type) as unknown,
+            );
+            if (!noteTypeValue) {
+              throw new Error(
+                "noteType must be one of fact, story, style, voice, todo, summary",
+              );
+            }
+            const contentValue = coerceOptionalString(args.content);
+            if (typeof contentValue !== "string") {
+              throw new Error("content is required for create_note");
+            }
+
+            const messageIds = new Set<Id<"messages">>();
+            const pushMessageId = (value: unknown) => {
+              const idString = coerceIdString(value);
+              if (idString) {
+                messageIds.add(idString as Id<"messages">);
+              }
+            };
+
+            if (Array.isArray(args.messageIds)) {
+              for (const entry of args.messageIds as unknown[]) {
+                pushMessageId(entry);
+              }
+            }
+            pushMessageId(args.messageId);
+
+            const mapTranscript = (raw: unknown) => {
+              const idString = coerceIdString(raw);
+              if (!idString) return;
+              const mapped = transcriptMessageIdsRef.current.get(idString);
+              if (mapped) {
+                messageIds.add(mapped);
+              }
+            };
+
+            if (Array.isArray(args.transcriptIds)) {
+              for (const entry of args.transcriptIds as unknown[]) {
+                mapTranscript(entry);
+              }
+            }
+            mapTranscript(args.transcriptId);
+
+            const confidenceValue =
+              typeof args.confidence === "number" &&
+              Number.isFinite(args.confidence)
+                ? args.confidence
+                : undefined;
+            const resolvedFlag =
+              typeof args.resolved === "boolean" ? args.resolved : undefined;
+            const todoStatusValue = coerceTodoStatusValue(
+              args.todoStatus ?? args.status,
+            );
+
+            const created = await createNoteMutation({
+              projectId,
+              sessionId:
+                sessionRecord?.sessionId ?? sessionIdRef.current ?? undefined,
+              noteType: noteTypeValue,
+              content: contentValue,
+              sourceMessageIds:
+                messageIds.size > 0 ? Array.from(messageIds) : undefined,
+              confidence: confidenceValue,
+              resolved: resolvedFlag,
+              todoStatus: todoStatusValue ?? undefined,
+            });
+            result = created;
+            success = true;
+            break;
+          }
+          case "update_todo_status": {
+            console.log("[realtime] tool:update_todo_status", { args });
+            const todoIdString = coerceIdString(args.todoId ?? args.id);
+            if (!todoIdString) {
+              throw new Error("todoId is required");
+            }
+            const statusValue = coerceTodoStatusValue(args.status);
+            if (!statusValue) {
+              throw new Error("status must be open, in_review, or resolved");
+            }
+            const updatedTodo = await updateTodoStatusMutation({
+              todoId: todoIdString as Id<"todos">,
+              status: statusValue,
+            });
+            result = updatedTodo;
+            success = true;
+            break;
+          }
+          case "record_transcript_pointer": {
+            console.log("[realtime] tool:record_transcript_pointer", { args });
+            const projectId = resolveProjectId(args) as Id<"projects">;
+            const sessionIdValue =
+              sessionRecord?.sessionId ?? sessionIdRef.current;
+            if (!sessionIdValue) {
+              throw new Error("Session id required for record_transcript_pointer");
+            }
+            let messageId: Id<"messages"> | null = null;
+            const messageIdValue = coerceIdString(args.messageId);
+            if (messageIdValue) {
+              messageId = messageIdValue as Id<"messages">;
+            }
+            const transcriptIdValue = coerceIdString(args.transcriptId);
+            if (!messageId && transcriptIdValue) {
+              messageId =
+                transcriptMessageIdsRef.current.get(transcriptIdValue) ?? null;
+            }
+            if (!messageId) {
+              throw new Error("messageId or transcriptId is required");
+            }
+            const blueprint = await recordTranscriptPointerMutation({
+              projectId,
+              sessionId: sessionIdValue,
+              messageId,
+            });
+            result = makeProjectToolResult({
+              project: null,
+              blueprint,
+              fallbackId: projectId,
+            });
+            success = true;
+            break;
+          }
+          case "get_document_workspace": {
+            console.log("[realtime] tool:get_document_workspace", { args });
+            const projectId = resolveProjectId(args);
+            const workspace = await convex.query(api.documents.getWorkspace, {
+              projectId: projectId as Id<"projects">,
+            });
+            result = workspace;
+            success = true;
+            break;
+          }
+          case "apply_document_edits": {
+            console.log("[realtime] tool:apply_document_edits", { args });
+            const projectId = resolveProjectId(args) as Id<"projects">;
+            const markdownValue = coerceOptionalString(args.markdown);
+            if (typeof markdownValue !== "string") {
+              throw new Error("markdown is required");
+            }
+            const sectionPayload = coerceDocumentSectionsPayload(args.sections);
+            const updated = await applyDocumentEditsMutation({
+              projectId,
+              markdown: markdownValue,
+              sections: sectionPayload.map((section) => ({
+                heading: section.heading,
+                content: section.content,
+                status: section.status,
+                order: section.order,
+              })),
+            });
+            result = updated;
+            success = true;
+            break;
+          }
           default: {
             throw new Error(`Unhandled tool call: ${name}`);
           }
@@ -1467,17 +1788,21 @@ const resolveProjectId = useCallback(
     },
     [
       assignProjectToSession,
+      applyDocumentEditsMutation,
       commitBlueprintMutation,
       convex,
       createProjectToolMutation,
+      createNoteMutation,
+      instructionContext.mode,
       logConnection,
       resolveProjectId,
+      recordTranscriptPointerMutation,
       submitToolResult,
       sessionRecord,
       syncBlueprintFieldMutation,
       transcriptMessageIdsRef,
+      updateTodoStatusMutation,
       updateProjectMetadataMutation,
-      coerceOptionalString,
     ],
   );
 
@@ -1855,6 +2180,7 @@ const resolveProjectId = useCallback(
     audioElementRef,
     createSessionMutation,
     handleServerEvent,
+    language,
     logConnection,
     noiseReduction,
     selectedInputDeviceId,
@@ -1882,7 +2208,8 @@ const resolveProjectId = useCallback(
       }
 
       const languageOption = findLanguageOption(language);
-      const hasProjectContext = Boolean(sessionRecord?.projectId);
+      const hasProjectContext =
+        instructionContext.mode !== "intake" || Boolean(sessionRecord?.projectId);
       const sessionUpdate: Record<string, unknown> = {};
 
       if (noiseReduction && noiseReduction !== "default") {
@@ -1894,6 +2221,9 @@ const resolveProjectId = useCallback(
       const instructions = buildSessionInstructions({
         language: languageOption,
         hasProjectContext,
+        mode: instructionContext.mode,
+        blueprintSummary: instructionContext.blueprintSummary,
+        draftingSnapshot: instructionContext.draftingSnapshot,
       });
       if (instructions && instructions !== lastInstructionRef.current) {
         sessionUpdate.instructions = instructions;
@@ -1938,6 +2268,7 @@ const resolveProjectId = useCallback(
       cancelled = true;
     };
   }, [
+    instructionContext,
     language,
     logConnection,
     noiseReduction,
@@ -1980,6 +2311,12 @@ const resolveProjectId = useCallback(
     [finalizeTranscript, waitForDataChannelOpen],
   );
 
+  useEffect(() => {
+    if (status === "idle" || status === "ended") {
+      resetInstructionContext();
+    }
+  }, [resetInstructionContext, status]);
+
   return useMemo(
     () => ({
       status,
@@ -2014,10 +2351,14 @@ const resolveProjectId = useCallback(
       assignProjectToSession,
       resolveMessageId,
       ingestProjects,
+      instructionContext,
+      updateInstructionContext,
+      resetInstructionContext,
     }),
     [
       assistantLevel,
       assignProjectToSession,
+      instructionContext,
       connectionLog,
       error,
       ingestProjects,
@@ -2030,6 +2371,7 @@ const resolveProjectId = useCallback(
       sessionRecord,
       refreshDevices,
       registerAudioElement,
+      resetInstructionContext,
       selectInputDevice,
       selectOutputDevice,
       selectedInputDeviceId,
@@ -2046,6 +2388,7 @@ const resolveProjectId = useCallback(
       serverEvents,
       setNoiseReduction,
       resolveMessageId,
+      updateInstructionContext,
     ],
   );
 }
