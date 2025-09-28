@@ -8,6 +8,8 @@ Layer conversational intelligence onto the realtime session so the assistant con
   - Blueprint context (goals, audience, timeline, etc.).
   - Interview questions derived from `docs/research/ghostwriting-best-practices.md`.
   - Behavior rules for paraphrasing, recap checkpoints, and polite clarifications.
+- Define and activate the `ghostwritingToolset` once a project is confirmed, exposing Convex helpers for `listProjects`, `getProject`, `updateProjectMetadata`, `syncBlueprintField`, `recordTranscriptPointer`, `commitBlueprint`, and any drafting/notes utilities required for downstream work.
+- Provide a tool-side pathway for `recordTranscriptPointer` so the assistant can tag blueprint updates and interview highlights with precise transcript references.
 - Implement a dedicated “voice workshop” turn early in the session collecting tone, structure, content markers (store results as `notes` with `noteType="voice"`).
 - Display outstanding TODOs / clarification chips sourced from unresolved topics.
 - Provide UI for the assistant to confirm facts and recap progress at defined milestones.
@@ -15,6 +17,7 @@ Layer conversational intelligence onto the realtime session so the assistant con
 
 ## Deliverables
 - Updated prompt/Session config modules (e.g., `lib/realtimePrompt.ts`).
+- Realtime tool configuration split between intake and ghostwriting modes, including the new `recordTranscriptPointer` wiring.
 - Realtime client utilities to send custom events (e.g., requesting clarifications, tracking TODO completion).
 - Convex mutations/queries for creating TODO items and voice notes.
 - UI components reflecting voice profile + TODO chips in the session view.

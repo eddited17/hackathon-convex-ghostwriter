@@ -6,15 +6,15 @@ Reimagine the entry experience so any realtime conversation can begin from the p
 ## Experience Flow
 1. **Launch point (project list)** — Home view surfaces recent projects plus a prominent "Start conversation" action. When triggered without an active project, the assistant opens with a greeting and clarifies whether the user is starting something new or picking up an existing project.
 2. **Mode selection dialogue** — Assistant listens for the user decision (voice or text) and confirms the mode. If the intent is ambiguous, it uses clarification follow-ups. The UI reflects the pending choice (e.g., badge or banner indicating "choosing project context").
-3. **Existing project path** — Assistant lists viable projects (fed by `projects` table) via tool calls, lets the user pick verbally or by tapping, and then loads the active project context. Once confirmed, the conversation switches into the ghostwriting toolset (notes, document updates, etc.) while keeping the standard realtime session view.
+3. **Existing project path** — Assistant lists viable projects (fed by `projects` table) via tool calls, lets the user pick verbally or by tapping, and then loads the active project context. Once confirmed, the conversation stays in intake-safe mode while exposing the data needed for later ghostwriting features.
 4. **New project path (blueprint mode)** — Assistant issues tool calls to create a draft project record and the associated blueprint document. The layout pivots to a dedicated blueprint panel that reflects the schema-backed fields: `title`, `contentType`, `goal` (project table) plus blueprint fields `desiredOutcome`, `targetAudience`, `publishingPlan`, `timeline`, `materialsInventory`, `communicationPreferences`, `budgetRange`, and `voiceGuardrails`.
 5. **Conversational slot filling** — For new projects, the assistant proceeds with progressive discovery loops, updating the blueprint panel in realtime as tool calls write to Convex. Each field shows provenance (e.g., "Summarized from your last answer") and confidence state. Users can correct items verbally; the assistant patches the relevant field via another tool call.
-6. **Manual project activation** — If a user manually selects a project card, the conversation starts directly in project mode, bypassing the mode-selection questions but still displaying the active project indicator and ghostwriting toolset.
+6. **Manual project activation** — If a user manually selects a project card, the conversation starts directly in project mode, bypassing the mode-selection questions but still displaying the active project indicator and preparing the context that downstream tasks will use for ghostwriting tools.
 7. **Confirmation & handoff** — Blueprint mode culminates in a confirmation step summarizing the configuration and linking the transcript ID. On approval, the assistant promotes the draft to an active project and transitions to the standard session layout so Task 03 can build on the captured data.
 
 ## Tool Calls & Data Binding
-- Define a `projectIntakeToolset` with capabilities to `listProjects`, `createProject`, `updateProjectMetadata`, `syncBlueprintField`, `recordTranscriptPointer`, and `commitBlueprint`. These operations should wrap Convex mutations/queries and enforce the schema contracts.
-- Define a `ghostwritingToolset` for in-project sessions (can reuse existing Task 01 hooks, but ensure it is explicitly loaded only after a project is chosen).
+- Define a `projectIntakeToolset` with capabilities to `listProjects`, `createProject`, `updateProjectMetadata`, `syncBlueprintField`, and `commitBlueprint`. These operations should wrap Convex mutations/queries and enforce the schema contracts.
+- Ghostwriting tooling (including transcript anchoring helpers such as `recordTranscriptPointer`) is handled in Task 03 once the conversational interview layer comes online.
 - The conversation orchestrator must inspect assistant responses for tool call directives, dispatch them, and stream the UI updates as mutation results arrive (Convex realtime should propagate the changes automatically).
 - Tool errors or conflicting updates should be verbalized by the assistant with suggestions for resolution (e.g., "I couldn't save the publishing plan; let's try rephrasing it").
 
@@ -29,8 +29,8 @@ Reimagine the entry experience so any realtime conversation can begin from the p
 
 ## Deliverables
 - Updated app shell under `app/` that presents the project list, session starter, and context-specific layouts (standard realtime panel vs. blueprint mode).
-- Conversation orchestration logic that routes between `projectIntakeToolset` and `ghostwritingToolset`, including natural-language intent detection for mode switching.
-- Convex functions/mutations implementing the toolset operations (project listing, creation, blueprint field updates, transcript tagging, blueprint commit).
+- Conversation orchestration logic that performs natural-language intent detection for mode switching inside intake mode (existing vs. new project) and hands off project context cleanly for later tasks.
+- Convex functions/mutations implementing the toolset operations (project listing, creation, blueprint field updates, blueprint commit).
 - Shared TypeScript types for the tool payloads and blueprint structures (extending `projects` and `projectBlueprints` definitions).
 - Optional: interaction tests or Storybook stories demonstrating both mode flows and realtime blueprint updates.
 
@@ -40,7 +40,7 @@ Reimagine the entry experience so any realtime conversation can begin from the p
 - Selecting "new project" triggers blueprint mode; all schema-backed fields appear, fill in as the user speaks, and persist correctly to `projects` and `projectBlueprints`.
 - Users can correct any field verbally or by editing the blueprint panel; updates propagate back to Convex and are acknowledged by the assistant.
 - Partial blueprint conversations survive refresh or handoff and can be resumed without losing collected data.
-- After blueprint confirmation, the conversation transitions into the standard session loop with the ghostwriting toolset already loaded.
+- After blueprint confirmation, the conversation transitions into the standard session loop with the groundwork in place for Task 03 to load the ghostwriting toolset.
 - `npm run lint`, `npm run typecheck`, and `npm run build` succeed.
 
 ## References

@@ -15,19 +15,24 @@ export default defineSchema({
     title: v.string(),
     contentType: v.string(),
     goal: v.optional(v.string()),
-    status: v.string(),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("active"),
+      v.literal("archived"),
+      v.literal("intake")
+    ),
     createdAt: v.number(),
     updatedAt: v.number()
   }).index("by_owner", ["ownerId"]),
 
   projectBlueprints: defineTable({
     projectId: v.id("projects"),
-    desiredOutcome: v.string(),
-    targetAudience: v.string(),
-    publishingPlan: v.string(),
-    timeline: v.string(),
-    materialsInventory: v.string(),
-    communicationPreferences: v.string(),
+    desiredOutcome: v.optional(v.string()),
+    targetAudience: v.optional(v.string()),
+    publishingPlan: v.optional(v.string()),
+    timeline: v.optional(v.string()),
+    materialsInventory: v.optional(v.string()),
+    communicationPreferences: v.optional(v.string()),
     budgetRange: v.optional(v.string()),
     voiceGuardrails: v.optional(
       v.object({
@@ -36,11 +41,15 @@ export default defineSchema({
         content: v.optional(v.string())
       })
     ),
-    createdAt: v.number()
+    status: v.union(v.literal("draft"), v.literal("committed")),
+    intakeSessionId: v.optional(v.id("sessions")),
+    intakeTranscriptMessageId: v.optional(v.id("messages")),
+    createdAt: v.number(),
+    updatedAt: v.number()
   }).index("by_project", ["projectId"]),
 
   sessions: defineTable({
-    projectId: v.id("projects"),
+    projectId: v.optional(v.id("projects")),
     startedAt: v.number(),
     endedAt: v.optional(v.number()),
     realtimeSessionId: v.optional(v.string()),
@@ -53,6 +62,7 @@ export default defineSchema({
         v.literal("far_field")
       )
     ),
+    language: v.optional(v.string()),
     updatedAt: v.optional(v.number())
   }).index("by_project", ["projectId"]),
 
