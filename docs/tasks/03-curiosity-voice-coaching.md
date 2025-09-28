@@ -1,30 +1,35 @@
-# Task 03 — Curiosity & Voice Coaching
+# Task 03 — Guided Interview & Live Drafting
 
 ## Summary
-Layer conversational intelligence onto the realtime session so the assistant conducts professional ghostwriter-style interviews and co-defines voice parameters. This task depends on Task 01 (realtime shell) and Task 02 (blueprint data).
+Deliver the document-first ghostwriting workspace: the assistant keeps interviewing like a pro, the draft updates in front of the user in real time, and every insight is captured for later refinement. Task 03 builds directly on the realtime session shell (Task 01) and the project blueprint intake (Task 02), so tone/voice rules are already locked in by the blueprint.
+
+## Parallel Loops
+1. **Conversation loop** — Continue the structured client interview (motivation, anecdotes, proof points, objections) grounded in the existing blueprint context. No extra tone workshop is required; the blueprint remains the single source of stylistic truth.
+2. **Drafting loop** — After each meaningful exchange, feed the entire current document plus new transcript excerpts into the drafting model. Apply the returned Markdown edits to the Convex `documents` record so updates stream to every client instantly.
+3. **Memory loop** — Persist structured notes (`noteType = fact | story | style | todo`) with transcript anchors via `recordTranscriptPointer`, and surface actionable TODOs for missing evidence or follow-ups.
 
 ## Key Requirements
-- System prompt + Realtime session instructions incorporating:
-  - Blueprint context (goals, audience, timeline, etc.).
-  - Interview questions derived from `docs/research/ghostwriting-best-practices.md`.
-  - Behavior rules for paraphrasing, recap checkpoints, and polite clarifications.
-- Implement a dedicated “voice workshop” turn early in the session collecting tone, structure, content markers (store results as `notes` with `noteType="voice"`).
-- Display outstanding TODOs / clarification chips sourced from unresolved topics.
-- Provide UI for the assistant to confirm facts and recap progress at defined milestones.
-- Persist conversation metadata (e.g., workshop responses, TODO status) to Convex.
+- **Document-first UI**: Introduce a `Document` tab (default) that renders the live Markdown draft, section outline, blueprint highlights, and the assistant-authored TODO checklist. All content should originate from the Convex document store so realtime streaming just works.
+- **Session settings tab**: Relocate today’s RealtimeSessionShell controls (transcripts, diagnostics, manual reply, audio/device selectors) into a secondary tab. Preserve hot paths like “manual text reply” without changing their behavior.
+- **Ghostwriting toolset activation**: Once a project is confirmed, expose Convex helpers for project fetch/update, blueprint sync, document mutations, `recordTranscriptPointer`, and notes/TODO writes. Intake-only tools must stay hidden in this mode.
+- **Whole-document drafting**: Every drafting call receives the entire current document and returns ordered edit operations (add/update/remove sections). Apply edits atomically to Convex, optimistic-render them in the Document tab, and reconcile with the streamed update.
+- **Structured note capture**: Each time the assistant creates or resolves a TODO/fact/story, log it with a transcript pointer so users can jump back to the source quote.
+- **Simple progress indicators**: Track per-section status (drafting, needs detail, complete) and show lightweight metrics such as word count or completion badges—keep it minimal but helpful.
 
 ## Deliverables
-- Updated prompt/Session config modules (e.g., `lib/realtimePrompt.ts`).
-- Realtime client utilities to send custom events (e.g., requesting clarifications, tracking TODO completion).
-- Convex mutations/queries for creating TODO items and voice notes.
-- UI components reflecting voice profile + TODO chips in the session view.
+- Updated session instructions/prompt scaffolding to reflect simultaneous interviewing + drafting responsibilities (using blueprint tone as-is).
+- Tabbed session layout separating `Document` and `Session settings` screens, including shared state plumbing.
+- React components/hooks for the Document tab: Markdown document viewer/editor, outline tracker, blueprint reminder panel, TODO list with resolve controls.
+- Ghostwriting toolset wiring across the realtime client and Convex functions, including document mutation endpoints and transcript-pointer support.
+- Drafting utilities that queue whole-document updates, stream Markdown edits into the UI, and persist results back to Convex.
 
 ## Acceptance Criteria
-- During a new session, assistant follows the interview structure and collects voice preferences without manual prompting.
-- Voice preferences saved to Convex and displayed in the UI; subsequent assistant turns respect them.
-- TODO chips appear when the assistant identifies missing info and can be marked resolved.
-- Recap checkpoints trigger after significant milestones (e.g., blueprint intake completion, voice workshop finish).
-- `npm run lint`, `npm run typecheck`, and `npm run build` pass.
+- While the user talks, the Document tab shows Markdown paragraphs appearing or being refined in real time; refreshing the page reflects the same state via Convex.
+- Notes and TODOs created by the assistant appear in the Document tab with links back to their transcript anchors, and they can be marked resolved.
+- Switching to the Session settings tab reveals transcripts, diagnostics, and device controls from Task 01 without resetting the document view.
+- Section progress indicators reflect the drafting loop’s status and prompt the assistant when additional detail is needed.
+- Only the ghostwriting toolset is active after project confirmation; intake prompts/tools do not fire.
+- `npm run lint`, `npm run typecheck`, and `npm run build` succeed.
 
 ## References
 - PRD §7.3, §7.4 (`docs/prd/ai-ghostwriter-prd.md`).
