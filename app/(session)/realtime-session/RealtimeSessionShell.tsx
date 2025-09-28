@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
-import type { NoiseReductionProfile } from "@/lib/realtimeAudio";
 import {
   CONTENT_TYPE_OPTIONS,
   BLUEPRINT_FIELD_ORDER,
@@ -12,11 +12,12 @@ import {
   type VoiceGuardrails,
 } from "@/lib/projects";
 
+import type { Id } from "@/convex/_generated/dataModel";
 import {
-  NOISE_REDUCTION_OPTIONS,
-  useRealtimeSession,
+  type RealtimeSessionState,
 } from "./useRealtimeSession";
 import { useProjectIntakeFlow } from "./useProjectIntakeFlow";
+import { useRealtimeSessionContext } from "./RealtimeSessionProvider";
 
 const formatTime = (timestamp: number) =>
   new Intl.DateTimeFormat(undefined, {
@@ -33,118 +34,11 @@ const formatDate = (timestamp: number) =>
     minute: "2-digit",
   }).format(timestamp);
 
-const phaseLabels: Record<string, { label: string; helper: string }> = {
-  idle: {
-    label: "Idle",
-    helper: "Start the assistant to choose a project context.",
-  },
-  "mode-selection": {
-    label: "Choosing project context",
-    helper: "Listening for new vs. existing project.",
-  },
-  "awaiting-existing": {
-    label: "Waiting for project",
-    helper: "Say a project name or tap a card to continue.",
-  },
-  blueprint: {
-    label: "Blueprint intake",
-    helper: "Capturing success outcomes, audience, and guardrails.",
-  },
-  active: {
-    label: "Ghostwriting mode",
-    helper: "Blueprint confirmed—continue drafting and notes.",
-  },
-};
-
 const getContentTypeLabel = (value: string) =>
   CONTENT_TYPE_OPTIONS.find((option) => option.value === value)?.label ?? value;
 
-type DeviceSelectProps = {
-  label: string;
-  devices: MediaDeviceInfo[];
-  value?: string;
-  onChange: (deviceId: string) => Promise<void>;
-  disabled?: boolean;
-};
-
-function DeviceSelect({ label, devices, value, onChange, disabled }: DeviceSelectProps) {
-  return (
-    <label className="device-select">
-      <span>{label}</span>
-      <select
-        disabled={disabled || devices.length === 0}
-        value={value ?? ""}
-        onChange={(event) => {
-          void onChange(event.target.value);
-        }}
-      >
-        {devices.length === 0 && <option value="">No devices detected</option>}
-        {devices.map((device) => (
-          <option key={device.deviceId} value={device.deviceId}>
-            {device.label || `${device.kind} (${device.deviceId})`}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-type LevelMeterProps = {
-  label: string;
-  level: number;
-  active: boolean;
-  tone: "primary" | "secondary";
-};
-
-function LevelMeter({ label, level, active, tone }: LevelMeterProps) {
-  const width = Math.min(100, Math.round(level * 100));
-  return (
-    <div className={`level-meter level-${tone}`}>
-      <div className="level-header">
-        <span>{label}</span>
-        <span className={`badge ${active ? "badge-active" : ""}`}>
-          {active ? "speaking" : "idle"}
-        </span>
-      </div>
-      <div className="meter-track">
-        <div className="meter-fill" style={{ width: `${width}%` }} />
-      </div>
-    </div>
-  );
-}
-
-type NoiseReductionToggleProps = {
-  value: NoiseReductionProfile;
-  onChange: (profile: NoiseReductionProfile) => void;
-  disabled?: boolean;
-};
-
-function NoiseReductionToggle({ value, onChange, disabled }: NoiseReductionToggleProps) {
-  return (
-    <fieldset className="noise-toggle" disabled={disabled}>
-      <legend>Noise reduction</legend>
-      {NOISE_REDUCTION_OPTIONS.map((option) => (
-        <label key={option.value} className="noise-option">
-          <input
-            type="radio"
-            name="noise-profile"
-            value={option.value}
-            checked={option.value === value}
-            onChange={() => onChange(option.value)}
-            disabled={disabled}
-          />
-          <div>
-            <span className="noise-label">{option.label}</span>
-            <span className="noise-description">{option.description}</span>
-          </div>
-        </label>
-      ))}
-    </fieldset>
-  );
-}
-
 type TranscriptListProps = {
-  transcripts: ReturnType<typeof useRealtimeSession>["transcripts"];
+  transcripts: RealtimeSessionState["transcripts"];
   partialUserTranscript: string | null;
   partialAssistantTranscript: string | null;
 };
@@ -189,8 +83,8 @@ function TranscriptList({ transcripts, partialAssistantTranscript, partialUserTr
 }
 
 type DiagnosticsProps = {
-  connectionLog: ReturnType<typeof useRealtimeSession>["connectionLog"];
-  serverEvents: ReturnType<typeof useRealtimeSession>["serverEvents"];
+  connectionLog: RealtimeSessionState["connectionLog"];
+  serverEvents: RealtimeSessionState["serverEvents"];
 };
 
 function Diagnostics({ connectionLog, serverEvents }: DiagnosticsProps) {
@@ -234,34 +128,21 @@ function Diagnostics({ connectionLog, serverEvents }: DiagnosticsProps) {
   );
 }
 
-const statusDescriptions: Record<string, string> = {
-  idle: "Idle — ready to connect",
-  "requesting-permissions": "Awaiting microphone permission",
-  connecting: "Connecting to OpenAI Realtime",
-  connected: "Streaming audio",
-  ended: "Session ended",
-  error: "Connection error",
-};
-
-export default function RealtimeSessionShell() {
+export default function RealtimeSessionShell({
+  projectTitle,
+  breadcrumbs,
+  projectId,
+}: {
+  projectTitle: string;
+  breadcrumbs: JSX.Element;
+  projectId?: Id<"projects">;
+}) {
+  const router = useRouter();
   const {
     status,
-    statusMessage,
     isConnected,
     startSession,
     stopSession,
-    refreshDevices,
-    inputDevices,
-    outputDevices,
-    selectedInputDeviceId,
-    selectInputDevice,
-    selectedOutputDeviceId,
-    selectOutputDevice,
-    noiseReduction,
-    setNoiseReduction,
-    microphoneLevel,
-    assistantLevel,
-    voiceActivity,
     transcripts,
     partialUserTranscript,
     partialAssistantTranscript,
@@ -273,20 +154,20 @@ export default function RealtimeSessionShell() {
     sessionRecord,
     assignProjectToSession,
     resolveMessageId,
-  } = useRealtimeSession();
+    ingestProjects,
+  } = useRealtimeSessionContext();
 
   const {
     phase,
-    modeIntent,
     projects: projectEntries,
     isLoadingProjects,
+    isProjectContextHydrated,
     activeProject,
     blueprint,
     fieldStates,
     activeFieldKey,
     beginConversation,
-    chooseExistingMode,
-    startNewProject,
+    beginProjectSession,
     openProject,
     setActiveFieldKey: focusBlueprintField,
     updateField,
@@ -302,6 +183,12 @@ export default function RealtimeSessionShell() {
     sessionRecord,
     assignProjectToSession,
     resolveMessageId,
+    ingestProjects,
+    onNavigateToProject: (targetProjectId) => {
+      if (projectId && targetProjectId === projectId) return;
+      router.push(`/projects/${targetProjectId}`);
+    },
+    initialProjectId: projectId ?? null,
   });
 
   const [manualMessage, setManualMessage] = useState("");
@@ -359,41 +246,6 @@ export default function RealtimeSessionShell() {
     activeProject?.contentType,
   ]);
 
-  const statusLabel = useMemo(() => {
-    const base = statusDescriptions[status] ?? status;
-    if (status === "error" && error) {
-      return `${base}: ${error}`;
-    }
-    if (statusMessage) {
-      return `${base}${statusMessage ? ` — ${statusMessage}` : ""}`;
-    }
-    return base;
-  }, [error, status, statusMessage]);
-
-  const phaseCopy = phaseLabels[phase] ?? {
-    label: phase,
-    helper: "",
-  };
-  const phaseLabel = phaseCopy.label;
-  const phaseHelper = useMemo(() => {
-    if (phase === "mode-selection") {
-      if (modeIntent === "new") {
-        return "Creating a fresh project blueprint.";
-      }
-      if (modeIntent === "existing") {
-        return "Listing recent projects for selection.";
-      }
-      return (
-        phaseCopy.helper ||
-        "Waiting to hear whether this is a new or existing project."
-      );
-    }
-    if (phase === "awaiting-existing") {
-      return "Say a project name or tap a card to continue.";
-    }
-    return phaseCopy.helper;
-  }, [phase, modeIntent, phaseCopy.helper]);
-
   const audioRef = useCallback(
     (element: HTMLAudioElement | null) => {
       registerAudioElement(element);
@@ -401,9 +253,25 @@ export default function RealtimeSessionShell() {
     [registerAudioElement],
   );
 
+  const selectedProjectId = activeProject?._id ?? sessionRecord?.projectId ?? null;
+  const hasExplicitProjectContext = Boolean(projectId ?? selectedProjectId);
+
   const handleBeginConversation = useCallback(() => {
+    if (hasExplicitProjectContext) {
+      if (!isProjectContextHydrated) {
+        console.warn("Project context still loading; delaying session start.");
+        return;
+      }
+      void beginProjectSession();
+      return;
+    }
     void beginConversation();
-  }, [beginConversation]);
+  }, [
+    beginConversation,
+    beginProjectSession,
+    isProjectContextHydrated,
+    hasExplicitProjectContext,
+  ]);
 
   const handleStop = useCallback(() => {
     void stopSession("Session ended by user");
@@ -418,7 +286,6 @@ export default function RealtimeSessionShell() {
     [manualMessage, sendTextMessage],
   );
 
-  const selectedProjectId = activeProject?._id ?? sessionRecord?.projectId ?? null;
   const blueprintProgress = fieldStates.filter((field) => field.isComplete).length;
   const blueprintTotal = fieldStates.length;
   const blueprintStatus = blueprint?.status ?? "draft";
@@ -483,22 +350,11 @@ export default function RealtimeSessionShell() {
 
   return (
     <div className="realtime-shell project-shell">
-      <header className="shell-header">
-        <div className="title-block">
-          <h1>Project Intake &amp; Realtime Workspace</h1>
-          <p>
-            Choose a project, capture its blueprint, and collaborate with the realtime assistant.
-          </p>
-        </div>
-        <div className="status-block">
-          <span className={`status-indicator status-${status}`}></span>
-          <span className="status-label">{statusLabel}</span>
-        </div>
-        <div className="phase-block">
-          <span className={`phase-badge phase-${phase}`}>{phaseLabel}</span>
-          <span className="phase-helper">{phaseHelper}</span>
-        </div>
-        <div className="header-actions">
+      <header className="shell-toolbar">
+        {breadcrumbs}
+        <h2>{projectTitle}</h2>
+
+        <div className="toolbar-actions">
           {isConnected ? (
             <button className="danger" onClick={handleStop}>
               End session
@@ -508,22 +364,20 @@ export default function RealtimeSessionShell() {
               className="primary"
               onClick={handleBeginConversation}
               disabled={
-                status === "connecting" || status === "requesting-permissions"
+                status === "connecting" ||
+                status === "requesting-permissions" ||
+                (hasExplicitProjectContext && !isProjectContextHydrated)
               }
             >
               Start conversation
             </button>
           )}
-          <button
-            onClick={() => {
-              void refreshDevices();
-            }}
-            disabled={status === "requesting-permissions"}
-          >
-            Refresh devices
-          </button>
         </div>
       </header>
+
+      {!isProjectContextHydrated && hasExplicitProjectContext ? (
+        <div className="alert">Preparing project context…</div>
+      ) : null}
 
       {error && status !== "error" ? (
         <div className="alert">{error}</div>
@@ -582,27 +436,9 @@ export default function RealtimeSessionShell() {
             </div>
           </div>
 
-          <div className="project-actions">
-            <button
-              className="primary"
-              onClick={() => {
-                void startNewProject();
-              }}
-              disabled={
-                status === "connecting" || status === "requesting-permissions"
-              }
-            >
-              New project blueprint
-            </button>
-            <button
-              onClick={() => {
-                void chooseExistingMode();
-              }}
-              disabled={!isConnected}
-            >
-              Ask assistant about existing projects
-            </button>
-          </div>
+          <p className="project-hint">
+            Review and adjust project metadata. Voice updates push straight into these fields.
+          </p>
 
           <div className="project-list-wrapper">
             <h3>Recent projects</h3>
@@ -611,8 +447,8 @@ export default function RealtimeSessionShell() {
                 projectEntries.map((entry, index) => {
                   const blueprintComplete = entry.blueprint
                     ? BLUEPRINT_FIELD_ORDER.filter((key) =>
-                        blueprintFieldHasValue(entry.blueprint!, key),
-                      ).length
+                      blueprintFieldHasValue(entry.blueprint!, key),
+                    ).length
                     : 0;
                   const blueprintCount = BLUEPRINT_FIELD_ORDER.length;
                   const isActive = selectedProjectId === entry.project._id;
@@ -653,44 +489,6 @@ export default function RealtimeSessionShell() {
             </ul>
           </div>
 
-          <div className="audio-controls">
-            <h3>Audio controls</h3>
-            <DeviceSelect
-              label="Microphone"
-              devices={inputDevices}
-              value={selectedInputDeviceId}
-              onChange={selectInputDevice}
-              disabled={status === "requesting-permissions"}
-            />
-            <DeviceSelect
-              label="Playback"
-              devices={outputDevices}
-              value={selectedOutputDeviceId}
-              onChange={selectOutputDevice}
-              disabled={status === "requesting-permissions"}
-            />
-            <NoiseReductionToggle
-              value={noiseReduction}
-              onChange={setNoiseReduction}
-              disabled={
-                status === "requesting-permissions" || status === "connecting"
-              }
-            />
-            <div className="meters">
-              <LevelMeter
-                label="Microphone"
-                level={microphoneLevel}
-                active={voiceActivity.user}
-                tone="primary"
-              />
-              <LevelMeter
-                label="Assistant audio"
-                level={assistantLevel}
-                active={voiceActivity.assistant}
-                tone="secondary"
-              />
-            </div>
-          </div>
         </aside>
 
         <section className="panel transcripts-panel">
@@ -746,9 +544,8 @@ export default function RealtimeSessionShell() {
               .map((field) => (
                 <div
                   key={field.key}
-                  className={`blueprint-field ${
-                    activeFieldKey === field.key ? "active" : ""
-                  }`}
+                  className={`blueprint-field ${activeFieldKey === field.key ? "active" : ""
+                    }`}
                   onClick={() => focusBlueprintField(field.key, true)}
                 >
                   <div className="field-header">
@@ -780,9 +577,8 @@ export default function RealtimeSessionShell() {
                 </div>
               ))}
             <div
-              className={`blueprint-field voice ${
-                activeFieldKey === "voiceGuardrails" ? "active" : ""
-              }`}
+              className={`blueprint-field voice ${activeFieldKey === "voiceGuardrails" ? "active" : ""
+                }`}
               onClick={() => focusBlueprintField("voiceGuardrails", true)}
             >
               <div className="field-header">

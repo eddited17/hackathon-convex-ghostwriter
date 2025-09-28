@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { ConvexClientProvider } from "@/components/ConvexClientProvider";
 import "./globals.css";
+
+import { AppProviders } from "./AppProviders";
 
 export const metadata: Metadata = {
   title: "AI Ghostwriter",
@@ -16,7 +17,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="app-body">
-        <ConvexClientProvider>{children}</ConvexClientProvider>
+        <AppProviders>{children}</AppProviders>
       </body>
     </html>
   );

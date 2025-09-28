@@ -1,9 +1,5 @@
-import RealtimeSessionShell from "./(session)/realtime-session/RealtimeSessionShell";
+import { redirect } from "next/navigation";
 
 export default function HomePage() {
-  return (
-    <main className="page">
-      <RealtimeSessionShell />
-    </main>
-  );
+  redirect("/projects");
 }

@@ -12,11 +12,15 @@ const NOISE_PROFILES = v.union(
   v.literal("far_field"),
 );
 
+const LANGUAGE_CODE = v.string();
+const DEFAULT_LANGUAGE_CODE = "en-US";
+
 export const createSession = mutation({
   args: {
     projectId: v.optional(v.id("projects")),
     noiseProfile: v.optional(NOISE_PROFILES),
     deferProject: v.optional(v.boolean()),
+    language: v.optional(LANGUAGE_CODE),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -38,6 +42,7 @@ export const createSession = mutation({
       summary: undefined,
       status: "active",
       inputAudioNoiseReduction: args.noiseProfile ?? "near_field",
+      language: args.language ?? DEFAULT_LANGUAGE_CODE,
       updatedAt: now,
     });
 
@@ -45,6 +50,7 @@ export const createSession = mutation({
       sessionId,
       projectId: assignedProjectId,
       startedAt: now,
+      language: args.language ?? DEFAULT_LANGUAGE_CODE,
     };
   },
 });
@@ -101,6 +107,19 @@ export const assignProjectContext = mutation({
   handler: async (ctx, args) => {
     await ctx.db.patch(args.sessionId, {
       projectId: args.projectId,
+      updatedAt: Date.now(),
+    });
+  },
+});
+
+export const setLanguagePreference = mutation({
+  args: {
+    sessionId: v.id("sessions"),
+    language: LANGUAGE_CODE,
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.sessionId, {
+      language: args.language,
       updatedAt: Date.now(),
     });
   },

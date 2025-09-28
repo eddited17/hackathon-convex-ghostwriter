@@ -62,6 +62,7 @@ export default defineSchema({
         v.literal("far_field")
       )
     ),
+    language: v.optional(v.string()),
     updatedAt: v.optional(v.number())
   }).index("by_project", ["projectId"]),
 
