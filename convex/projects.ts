@@ -227,15 +227,24 @@ export const recordTranscriptPointer = mutation({
   args: {
     projectId: v.id("projects"),
     sessionId: v.id("sessions"),
-    messageId: v.id("messages"),
+    messageId: v.union(v.id("messages"), v.string()),
   },
   handler: async (ctx, args): Promise<Doc<"projectBlueprints">> => {
     const now = Date.now();
     const blueprint = await ensureProjectBlueprint(ctx, args.projectId, now);
 
+    const normalizedMessageId =
+      typeof args.messageId === "string"
+        ? ctx.db.normalizeId("messages", args.messageId)
+        : args.messageId;
+
+    if (!normalizedMessageId) {
+      throw new Error("Unable to resolve messageId for transcript pointer");
+    }
+
     await ctx.db.patch(blueprint._id, {
       intakeSessionId: args.sessionId,
-      intakeTranscriptMessageId: args.messageId,
+      intakeTranscriptMessageId: normalizedMessageId,
       updatedAt: now,
     });
 

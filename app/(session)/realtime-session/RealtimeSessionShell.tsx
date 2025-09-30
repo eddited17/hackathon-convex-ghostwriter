@@ -5,8 +5,6 @@ import { useRouter } from "next/navigation";
 
 import {
   CONTENT_TYPE_OPTIONS,
-  BLUEPRINT_FIELD_ORDER,
-  blueprintFieldHasValue,
   type BlueprintFieldKey,
   type ContentType,
   type VoiceGuardrails,
@@ -35,9 +33,6 @@ const formatDate = (timestamp: number) =>
     hour: "2-digit",
     minute: "2-digit",
   }).format(timestamp);
-
-const getContentTypeLabel = (value: string) =>
-  CONTENT_TYPE_OPTIONS.find((option) => option.value === value)?.label ?? value;
 
 type TranscriptListProps = {
   transcripts: RealtimeSessionState["transcripts"];
@@ -171,8 +166,6 @@ export default function RealtimeSessionShell({
 
   const {
     phase,
-    projects: projectEntries,
-    isLoadingProjects,
     isProjectContextHydrated,
     activeProject,
     blueprint,
@@ -180,13 +173,15 @@ export default function RealtimeSessionShell({
     activeFieldKey,
     beginConversation,
     beginProjectSession,
-    openProject,
     setActiveFieldKey: focusBlueprintField,
     updateField,
     updateVoiceGuardrails,
     updateProjectMetadata,
     isBlueprintComplete,
+    isBlueprintBypassed,
     commitBlueprint,
+    skipBlueprint,
+    resumeBlueprint,
   } = useProjectIntakeFlow({
     transcripts,
     status,
@@ -394,6 +389,14 @@ export default function RealtimeSessionShell({
     [activeProject, updateProjectMetadata],
   );
 
+  const handleSkipBlueprint = useCallback(() => {
+    void skipBlueprint();
+  }, [skipBlueprint]);
+
+  const handleResumeBlueprint = useCallback(() => {
+    void resumeBlueprint();
+  }, [resumeBlueprint]);
+
   return (
     <div className="realtime-shell project-shell">
       <header className="shell-toolbar">
@@ -446,281 +449,255 @@ export default function RealtimeSessionShell({
         </button>
       </div>
 
-      {activeTab === "document" ? (
-        <div className="document-tab">
-          <section className="panel project-panel">
-            <div className="panel-header">
-              <h2>Project overview</h2>
-              {isLoadingProjects ? <span className="chip">Loading…</span> : null}
-            </div>
-            <div className="project-meta">
-              <label>
-                <span>Project title</span>
-                <input
-                  type="text"
-                  value={titleDraft}
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  onBlur={handleTitleBlur}
-                  placeholder="Name this project"
-                  disabled={!activeProject}
-                />
-              </label>
-              <label>
-                <span>Content type</span>
-                <select
-                  value={contentTypeDraft}
-                  onChange={(event) =>
-                    handleContentTypeChange(event.target.value as ContentType)
-                  }
-                  disabled={!activeProject}
-                >
-                  {CONTENT_TYPE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>Project goal</span>
-                <textarea
-                  value={goalDraft}
-                  onChange={(event) => setGoalDraft(event.target.value)}
-                  onBlur={handleGoalBlur}
-                  placeholder="Describe the outcome we’re chasing"
-                  rows={3}
-                  disabled={!activeProject}
-                />
-              </label>
-              <div className="project-progress">
-                <span>Blueprint</span>
-                <span>
-                  {blueprintProgress}/{blueprintTotal} • {blueprintStatus}
-                </span>
-              </div>
-            </div>
-
-            <p className="project-hint">
-              Review and adjust project metadata. Voice updates push straight into these fields.
-            </p>
-
-            <div className="project-list-wrapper">
-              <h3>Recent projects</h3>
-              <ul className="project-list">
-                {projectEntries && projectEntries.length > 0 ? (
-                  projectEntries.map((entry, index) => {
-                    const blueprintComplete = entry.blueprint
-                      ? BLUEPRINT_FIELD_ORDER.filter((key) =>
-                          blueprintFieldHasValue(entry.blueprint!, key),
-                        ).length
-                      : 0;
-                    const blueprintCount = BLUEPRINT_FIELD_ORDER.length;
-                    const isActive = selectedProjectId === entry.project._id;
-                    return (
-                      <li key={entry.project._id}>
-                        <button
-                          type="button"
-                          className={`project-card ${isActive ? "active" : ""}`}
-                          onClick={() => {
-                            void openProject(entry.project._id);
-                          }}
-                        >
-                          <div className="project-card-header">
-                            <span className="project-card-index">{index + 1}</span>
-                            <span className="project-card-title">
-                              {entry.project.title}
-                            </span>
-                          </div>
-                          <div className="project-card-meta">
-                            <span>{getContentTypeLabel(entry.project.contentType)}</span>
-                            <span>Updated {formatDate(entry.project.updatedAt)}</span>
-                          </div>
-                          <div className="project-card-blueprint">
-                            <span>{entry.blueprint?.status ?? "draft"}</span>
-                            <span>
-                              {blueprintComplete}/{blueprintCount} fields
-                            </span>
-                          </div>
-                        </button>
-                      </li>
-                    );
-                  })
-                ) : (
-                  <li className="placeholder">
-                    Start a blueprint to see it listed here.
-                  </li>
-                )}
-              </ul>
-            </div>
-          </section>
-          {phase !== "active" ? (
-            <div className="document-placeholder">
-              <p>
-                The document view unlocks after the blueprint is committed. Use the
-                Session settings tab to finish capturing project details.
-              </p>
-            </div>
-          ) : null}
-          <DocumentWorkspace
-            projectId={selectedProjectId}
-            blueprint={blueprint}
-            fieldStates={fieldStates}
-            onSnapshot={setDraftSnapshot}
-          />
-        </div>
-      ) : (
-        <div className="settings-grid">
-          <div className="settings-column">
-            <section className="panel blueprint-panel">
-              <div className="panel-header">
-                <h2>Blueprint fields</h2>
-                <div className="blueprint-summary">
-                  <span className={`blueprint-status status-${blueprintStatus}`}>
-                    {blueprintStatus}
-                  </span>
-                  <span>
-                    {blueprintProgress}/{blueprintTotal} complete
-                  </span>
+      <div className="session-layout">
+        <div className="session-main-column">
+          {activeTab === "document" ? (
+            <>
+              {phase !== "active" ? (
+                <div className="document-placeholder">
+                  <p>
+                    The document view unlocks after the blueprint is committed. Use the
+                    Session settings tab to finish capturing project details or select
+                    Skip setup & start drafting.
+                  </p>
                 </div>
-              </div>
-              <p className="panel-description">
-                During blueprint mode the assistant fills these fields automatically.
-                You can adjust them anytime.
-              </p>
-              <div className="blueprint-fields">
-                {fieldStates
-                  .filter((field) => field.key !== "voiceGuardrails")
-                  .map((field) => (
-                    <div
-                      key={field.key}
-                      className={`blueprint-field ${
-                        activeFieldKey === field.key ? "active" : ""
-                      }`}
-                      onClick={() => focusBlueprintField(field.key, true)}
+              ) : null}
+              <DocumentWorkspace
+                projectId={selectedProjectId}
+                blueprint={blueprint}
+                fieldStates={fieldStates}
+                onSnapshot={setDraftSnapshot}
+              />
+            </>
+          ) : (
+            <>
+              <section className="panel project-panel">
+                <div className="panel-header">
+                  <h2>Project overview</h2>
+                </div>
+                <div className="project-meta">
+                  <label>
+                    <span>Project title</span>
+                    <input
+                      type="text"
+                      value={titleDraft}
+                      onChange={(event) => setTitleDraft(event.target.value)}
+                      onBlur={handleTitleBlur}
+                      placeholder="Name this project"
+                      disabled={!activeProject}
+                    />
+                  </label>
+                  <label>
+                    <span>Content type</span>
+                    <select
+                      value={contentTypeDraft}
+                      onChange={(event) =>
+                        handleContentTypeChange(event.target.value as ContentType)
+                      }
+                      disabled={!activeProject}
                     >
-                      <div className="field-header">
-                        <h3>{field.label}</h3>
-                        {field.activity ? (
-                          <span className={`field-activity badge-${field.activity.source}`}>
-                            {field.activity.source === "voice"
-                              ? "Captured from voice"
-                              : "Manual edit"}
-                            {field.activity.updatedAt
-                              ? ` · ${formatTime(field.activity.updatedAt)}`
-                              : null}
-                          </span>
+                      {CONTENT_TYPE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Project goal</span>
+                    <textarea
+                      value={goalDraft}
+                      onChange={(event) => setGoalDraft(event.target.value)}
+                      onBlur={handleGoalBlur}
+                      placeholder="Describe the outcome we’re chasing"
+                      rows={3}
+                      disabled={!activeProject}
+                    />
+                  </label>
+                  <div className="project-progress">
+                    <span>Blueprint</span>
+                    <span>
+                      {blueprintProgress}/{blueprintTotal} • {blueprintStatus}
+                    </span>
+                  </div>
+                </div>
+
+                <p className="project-hint">
+                  Review and adjust project metadata. Voice updates push straight into these fields.
+                </p>
+              </section>
+              <section className="panel blueprint-panel">
+                <div className="panel-header">
+                  <h2>Blueprint fields</h2>
+                  <div className="blueprint-summary">
+                    <span className={`blueprint-status status-${blueprintStatus}`}>
+                      {blueprintStatus}
+                    </span>
+                    <span>
+                      {blueprintProgress}/{blueprintTotal} complete
+                    </span>
+                  </div>
+                </div>
+                {!isBlueprintComplete ? (
+                  <div className="blueprint-actions">
+                    {phase === "blueprint" ? (
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={handleSkipBlueprint}
+                      >
+                        Skip setup & start drafting
+                      </button>
+                    ) : isBlueprintBypassed ? (
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={handleResumeBlueprint}
+                      >
+                        Resume setup
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+                <p className="panel-description">
+                  During blueprint mode the assistant fills these fields automatically.
+                  You can adjust them anytime.
+                </p>
+                <div className="blueprint-fields">
+                  {fieldStates
+                    .filter((field) => field.key !== "voiceGuardrails")
+                    .map((field) => (
+                      <div
+                        key={field.key}
+                        className={`blueprint-field ${
+                          activeFieldKey === field.key ? "active" : ""
+                        }`}
+                        onClick={() => focusBlueprintField(field.key, true)}
+                      >
+                        <div className="field-header">
+                          <h3>{field.label}</h3>
+                          {field.activity ? (
+                            <span className={`field-activity badge-${field.activity.source}`}>
+                              {field.activity.source === "voice"
+                                ? "Captured from voice"
+                                : "Manual edit"}
+                              {field.activity.updatedAt
+                                ? ` · ${formatTime(field.activity.updatedAt)}`
+                                : null}
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="field-helper">{field.helper}</p>
+                        <textarea
+                          value={fieldDrafts[field.key] ?? ""}
+                          onChange={(event) =>
+                            handleFieldDraftChange(field.key, event.target.value)
+                          }
+                          onBlur={() => handleFieldBlur(field.key)}
+                          placeholder={field.placeholder}
+                          rows={field.type === "text" ? 2 : 4}
+                        />
+                        {phase === "blueprint" && activeFieldKey === field.key ? (
+                          <span className="field-status">Listening for your answer…</span>
                         ) : null}
                       </div>
-                      <p className="field-helper">{field.helper}</p>
-                      <textarea
-                        value={fieldDrafts[field.key] ?? ""}
-                        onChange={(event) =>
-                          handleFieldDraftChange(field.key, event.target.value)
-                        }
-                        onBlur={() => handleFieldBlur(field.key)}
-                        placeholder={field.placeholder}
-                        rows={field.type === "text" ? 2 : 4}
-                      />
-                      {phase === "blueprint" && activeFieldKey === field.key ? (
-                        <span className="field-status">Listening for your answer…</span>
-                      ) : null}
+                    ))}
+                  <div
+                    className={`blueprint-field voice ${
+                      activeFieldKey === "voiceGuardrails" ? "active" : ""
+                    }`}
+                    onClick={() => focusBlueprintField("voiceGuardrails", true)}
+                  >
+                    <div className="field-header">
+                      <h3>Voice guardrails</h3>
                     </div>
-                  ))}
-                <div
-                  className={`blueprint-field voice ${
-                    activeFieldKey === "voiceGuardrails" ? "active" : ""
-                  }`}
-                  onClick={() => focusBlueprintField("voiceGuardrails", true)}
-                >
-                  <div className="field-header">
-                    <h3>Voice guardrails</h3>
-                  </div>
-                  <p className="field-helper">
-                    Tone cues, structural preferences, and content boundaries to keep drafts aligned.
-                  </p>
-                  <div className="voice-grid">
-                    <label>
-                      <span>Tone</span>
-                      <textarea
-                        value={voiceDraft.tone ?? ""}
-                        onChange={(event) =>
-                          handleVoiceChange("tone", event.target.value)
-                        }
-                        onBlur={handleVoiceBlur}
-                        rows={2}
-                      />
-                    </label>
-                    <label>
-                      <span>Structure</span>
-                      <textarea
-                        value={voiceDraft.structure ?? ""}
-                        onChange={(event) =>
-                          handleVoiceChange("structure", event.target.value)
-                        }
-                        onBlur={handleVoiceBlur}
-                        rows={2}
-                      />
-                    </label>
-                    <label>
-                      <span>Content boundaries</span>
-                      <textarea
-                        value={voiceDraft.content ?? ""}
-                        onChange={(event) =>
-                          handleVoiceChange("content", event.target.value)
-                        }
-                        onBlur={handleVoiceBlur}
-                        rows={2}
-                      />
-                    </label>
+                    <p className="field-helper">
+                      Tone cues, structural preferences, and content boundaries to keep drafts aligned.
+                    </p>
+                    <div className="voice-grid">
+                      <label>
+                        <span>Tone</span>
+                        <textarea
+                          value={voiceDraft.tone ?? ""}
+                          onChange={(event) =>
+                            handleVoiceChange("tone", event.target.value)
+                          }
+                          onBlur={handleVoiceBlur}
+                          rows={2}
+                        />
+                      </label>
+                      <label>
+                        <span>Structure</span>
+                        <textarea
+                          value={voiceDraft.structure ?? ""}
+                          onChange={(event) =>
+                            handleVoiceChange("structure", event.target.value)
+                          }
+                          onBlur={handleVoiceBlur}
+                          rows={2}
+                        />
+                      </label>
+                      <label>
+                        <span>Content boundaries</span>
+                        <textarea
+                          value={voiceDraft.content ?? ""}
+                          onChange={(event) =>
+                            handleVoiceChange("content", event.target.value)
+                          }
+                          onBlur={handleVoiceBlur}
+                          rows={2}
+                        />
+                      </label>
+                    </div>
                   </div>
                 </div>
-              </div>
-              {phase === "blueprint" ? (
-                <button
-                  className="primary"
-                  onClick={() => {
-                    void commitBlueprint();
-                  }}
-                  disabled={!isBlueprintComplete}
-                >
-                  Commit blueprint & continue
-                </button>
-              ) : null}
-            </section>
-            <section className="panel transcripts-panel">
-              <div className="panel-header">
-                <h2>Conversation transcript</h2>
-                {sessionStartedAtLabel ? (
-                  <span className="panel-subtitle">Started {sessionStartedAtLabel}</span>
+                {phase === "blueprint" ? (
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      void commitBlueprint();
+                    }}
+                    disabled={!isBlueprintComplete}
+                  >
+                    Commit blueprint & continue
+                  </button>
                 ) : null}
-              </div>
-              <TranscriptList
-                transcripts={transcripts}
-                partialAssistantTranscript={partialAssistantTranscript}
-                partialUserTranscript={partialUserTranscript}
-              />
-              <form className="manual-entry" onSubmit={handleManualSubmit}>
-                <label>
-                  Manual text reply
-                  <textarea
-                    value={manualMessage}
-                    onChange={(event) => setManualMessage(event.target.value)}
-                    placeholder="Type a quick response when you can’t speak"
-                    disabled={!isConnected}
-                  />
-                </label>
-                <button type="submit" disabled={!isConnected || !manualMessage.trim()}>
-                  Send to assistant
-                </button>
-              </form>
-              <div className="diagnostics-inline">
-                <Diagnostics connectionLog={connectionLog} serverEvents={serverEvents} />
-              </div>
-            </section>
-          </div>
-          <SessionControlBar />
+              </section>
+              <section className="panel transcripts-panel">
+                <div className="panel-header">
+                  <h2>Conversation transcript</h2>
+                  {sessionStartedAtLabel ? (
+                    <span className="panel-subtitle">Started {sessionStartedAtLabel}</span>
+                  ) : null}
+                </div>
+                <TranscriptList
+                  transcripts={transcripts}
+                  partialAssistantTranscript={partialAssistantTranscript}
+                  partialUserTranscript={partialUserTranscript}
+                />
+                <form className="manual-entry" onSubmit={handleManualSubmit}>
+                  <label>
+                    Manual text reply
+                    <textarea
+                      value={manualMessage}
+                      onChange={(event) => setManualMessage(event.target.value)}
+                      placeholder="Type a quick response when you can’t speak"
+                      disabled={!isConnected}
+                    />
+                  </label>
+                  <button type="submit" disabled={!isConnected || !manualMessage.trim()}>
+                    Send to assistant
+                  </button>
+                </form>
+                <div className="diagnostics-inline">
+                  <Diagnostics connectionLog={connectionLog} serverEvents={serverEvents} />
+                </div>
+              </section>
+            </>
+          )}
         </div>
-      )}
+        <SessionControlBar />
+      </div>
       <audio ref={audioRef} className="hidden-audio" />
     </div>
   );

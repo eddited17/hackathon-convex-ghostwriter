@@ -25,6 +25,7 @@ import {
   type SessionInstructionMode,
   type SessionInstructionOptions,
 } from "@/lib/realtimeInstructions";
+import { getToolsForMode } from "@/lib/realtimeTools";
 
 const randomId = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -761,8 +762,19 @@ export function useRealtimeSession(): RealtimeSessionState {
   const handledToolCallIdsRef = useRef<Set<string>>(new Set());
   const completeOnceRef = useRef(false);
   const lastInstructionRef = useRef<string | null>(null);
+  const lastToolSignatureRef = useRef<string | null>(null);
   const lastProjectResultsRef = useRef<ProjectToolResult[]>([]);
   const sessionIdRef = useRef<Id<"sessions"> | null>(null);
+
+  const registerMessagePointer = useCallback(
+    (pointer: string | null | undefined, messageId: Id<"messages">) => {
+      if (!pointer) return;
+      const trimmed = pointer.trim();
+      if (!trimmed) return;
+      transcriptMessageIdsRef.current.set(trimmed, messageId);
+    },
+    [],
+  );
 
   const ingestProjects = useCallback(
     (entries: Array<{ project: ProjectDoc; blueprint: BlueprintDoc | null }>) => {
@@ -1032,14 +1044,60 @@ const resolveProjectId = useCallback(
             eventId: key,
           });
           if (persisted?.messageId) {
-            transcriptMessageIdsRef.current.set(key, persisted.messageId);
+            console.log("[realtime] persisted messageId", persisted.messageId);
+            registerMessagePointer(key, persisted.messageId);
+            const hyphenIndex = key.indexOf("-");
+            if (hyphenIndex !== -1 && hyphenIndex < key.length - 1) {
+              registerMessagePointer(
+                key.slice(hyphenIndex + 1),
+                persisted.messageId,
+              );
+            }
+            registerMessagePointer(persisted.messageId, persisted.messageId);
           }
         } catch (persistError) {
           console.error("Failed to persist transcript", persistError);
         }
       }
     },
-    [appendMessageMutation, sessionRecord],
+    [appendMessageMutation, registerMessagePointer, sessionRecord],
+  );
+
+  const resolveMessagePointer = useCallback(
+    (value: string | null | undefined): Id<"messages"> | null => {
+      if (!value) return null;
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+
+      const candidates = new Set<string>([trimmed]);
+      const hyphenIndex = trimmed.indexOf("-");
+      if (hyphenIndex > 0 && hyphenIndex < trimmed.length - 1) {
+        candidates.add(trimmed.slice(hyphenIndex + 1));
+      }
+      if (!trimmed.startsWith("assistant-")) {
+        candidates.add(`assistant-${trimmed}`);
+      }
+      if (!trimmed.startsWith("user-")) {
+        candidates.add(`user-${trimmed}`);
+      }
+
+      for (const candidate of candidates) {
+        const mapped = transcriptMessageIdsRef.current.get(candidate);
+        if (mapped) {
+          return mapped;
+        }
+      }
+
+      const lowered = trimmed.toLowerCase();
+      const looksLikeConvexId =
+        lowered === trimmed && /^[a-z0-9]{10,}$/.test(lowered);
+      if (looksLikeConvexId) {
+        return trimmed as Id<"messages">;
+      }
+
+      return null;
+    },
+    [],
   );
 
 
@@ -1080,6 +1138,8 @@ const resolveProjectId = useCallback(
         }
       }
       setSessionRecord(null);
+      lastInstructionRef.current = null;
+      lastToolSignatureRef.current = null;
       setStatus("ended");
     },
     [completeSessionMutation, sessionRecord, status, tearDownConnection],
@@ -1184,9 +1244,8 @@ const resolveProjectId = useCallback(
   );
 
   const resolveMessageId = useCallback(
-    (transcriptId: string) =>
-      transcriptMessageIdsRef.current.get(transcriptId) ?? null,
-    [],
+    (transcriptId: string) => resolveMessagePointer(transcriptId) ?? null,
+    [resolveMessagePointer],
   );
 
   const waitForDataChannelOpen = useCallback(async () => {
@@ -1339,6 +1398,58 @@ const resolveProjectId = useCallback(
       return true;
     },
     [waitForDataChannelOpen],
+  );
+
+  const pushSystemMessage = useCallback(
+    async (text: string) => {
+      try {
+        await waitForDataChannelOpen();
+      } catch (connectionError) {
+        console.error(
+          "[realtime] failed to push system message (channel unavailable)",
+          connectionError,
+          { text },
+        );
+        return;
+      }
+
+      const channel = dataChannelRef.current;
+      if (!channel || channel.readyState !== "open") {
+        console.warn("[realtime] system message skipped (channel closed)", { text });
+        return;
+      }
+
+      try {
+        channel.send(
+          JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text,
+                },
+              ],
+            },
+          }),
+        );
+      } catch (sendError) {
+        console.error("[realtime] failed to send system message", sendError, {
+          text,
+        });
+      }
+    },
+    [waitForDataChannelOpen],
+  );
+
+  const emitSystemJsonMessage = useCallback(
+    async (tag: string, payload: Record<string, unknown>) => {
+      const serialized = safeJsonStringify(payload);
+      await pushSystemMessage(`${tag}::${serialized}`);
+    },
+    [pushSystemMessage],
   );
 
   const handleToolCall = useCallback(
@@ -1517,19 +1628,22 @@ const resolveProjectId = useCallback(
               value = typeof guardrails === "undefined" ? null : guardrails;
             } else {
               const stringValue = coerceOptionalString(args.value);
-              if (typeof stringValue === "undefined") {
-                throw new Error("value is required for sync_blueprint_field");
-              }
-              value = stringValue ?? null;
+            if (typeof stringValue === "undefined") {
+              throw new Error("value is required for sync_blueprint_field");
             }
-
-            const transcriptId =
-              typeof args.transcriptId === "string"
-                ? args.transcriptId
+            value = stringValue ?? null;
+            }
+            const messagePointer = coerceIdString(args.messageId);
+            let messageId =
+              messagePointer
+                ? resolveMessagePointer(messagePointer) ?? undefined
                 : undefined;
-            const messageId = transcriptId
-              ? transcriptMessageIdsRef.current.get(transcriptId) ?? undefined
-              : undefined;
+            if (!messageId) {
+              const transcriptPointer = coerceIdString(args.transcriptId);
+              if (transcriptPointer) {
+                messageId = resolveMessagePointer(transcriptPointer) ?? undefined;
+              }
+            }
 
             const syncArgs: Parameters<typeof syncBlueprintFieldMutation>[0] = {
               projectId: projectId as Id<"projects">,
@@ -1627,7 +1741,10 @@ const resolveProjectId = useCallback(
             const pushMessageId = (value: unknown) => {
               const idString = coerceIdString(value);
               if (idString) {
-                messageIds.add(idString as Id<"messages">);
+                const mapped = resolveMessagePointer(idString);
+                if (mapped) {
+                  messageIds.add(mapped);
+                }
               }
             };
 
@@ -1641,7 +1758,7 @@ const resolveProjectId = useCallback(
             const mapTranscript = (raw: unknown) => {
               const idString = coerceIdString(raw);
               if (!idString) return;
-              const mapped = transcriptMessageIdsRef.current.get(idString);
+              const mapped = resolveMessagePointer(idString);
               if (mapped) {
                 messageIds.add(mapped);
               }
@@ -1708,17 +1825,71 @@ const resolveProjectId = useCallback(
               throw new Error("Session id required for record_transcript_pointer");
             }
             let messageId: Id<"messages"> | null = null;
-            const messageIdValue = coerceIdString(args.messageId);
-            if (messageIdValue) {
-              messageId = messageIdValue as Id<"messages">;
+            const argRecord = args as Record<string, unknown>;
+
+            const pointerCandidates = new Set<string>();
+            const pushCandidate = (value: unknown) => {
+              const idValue = coerceIdString(value);
+              if (idValue) {
+                pointerCandidates.add(idValue);
+              }
+            };
+
+            pushCandidate(argRecord.messageId);
+            pushCandidate(argRecord.message_id);
+            pushCandidate(argRecord.messagePointer);
+            pushCandidate(argRecord.pointer);
+            pushCandidate(argRecord.transcriptId);
+            pushCandidate(argRecord.transcript_id);
+            pushCandidate(argRecord.transcriptPointer);
+            pushCandidate(argRecord.transcript);
+
+            const arrayKeys = [
+              "messageIds",
+              "messages",
+              "message_ids",
+              "transcriptIds",
+              "transcripts",
+              "transcript_ids",
+              "pointers",
+            ];
+
+            for (const key of arrayKeys) {
+              const value = argRecord[key];
+              if (Array.isArray(value)) {
+                for (const entry of value) {
+                  pushCandidate(entry);
+                }
+              }
             }
-            const transcriptIdValue = coerceIdString(args.transcriptId);
-            if (!messageId && transcriptIdValue) {
-              messageId =
-                transcriptMessageIdsRef.current.get(transcriptIdValue) ?? null;
+
+            if (isRecord(argRecord)) {
+              for (const [key, value] of Object.entries(argRecord)) {
+                const lowered = key.toLowerCase();
+                if (lowered.includes("message") || lowered.includes("transcript")) {
+                  if (Array.isArray(value)) {
+                    for (const entry of value) {
+                      pushCandidate(entry);
+                    }
+                  } else {
+                    pushCandidate(value);
+                  }
+                }
+              }
             }
+
+            for (const pointer of pointerCandidates) {
+              const resolved = resolveMessagePointer(pointer);
+              if (resolved) {
+                messageId = resolved;
+                break;
+              }
+            }
+
             if (!messageId) {
-              throw new Error("messageId or transcriptId is required");
+              throw new Error(
+                "messageId or transcriptId is required and must reference a known transcript",
+              );
             }
             const blueprint = await recordTranscriptPointerMutation({
               projectId,
@@ -1751,17 +1922,66 @@ const resolveProjectId = useCallback(
               throw new Error("markdown is required");
             }
             const sectionPayload = coerceDocumentSectionsPayload(args.sections);
-            const updated = await applyDocumentEditsMutation({
+            const summaryValue = coerceOptionalString(args.summary);
+            const acceptedAt = Date.now();
+            const sectionsSummary = sectionPayload.map((section) => ({
+              heading: section.heading,
+              status: section.status ?? "drafting",
+              order: section.order ?? null,
+            }));
+
+            void (async () => {
+              try {
+                const updated = await applyDocumentEditsMutation({
+                  projectId,
+                  markdown: markdownValue,
+                  sections: sectionPayload.map((section) => ({
+                    heading: section.heading,
+                    content: section.content,
+                    status: section.status,
+                    order: section.order,
+                  })),
+                  summary:
+                    typeof summaryValue === "string" ? summaryValue : undefined,
+                });
+                await emitSystemJsonMessage("TOOL_PROGRESS", {
+                  tool: name,
+                  tool_call_id: toolCallId,
+                  status: "completed",
+                  projectId,
+                  updatedAt: Date.now(),
+                  sections: updated.sections.map((section) => ({
+                    heading: section.heading,
+                    status: section.status,
+                    order: section.order,
+                  })),
+                  summary: typeof summaryValue === "string" ? summaryValue : undefined,
+                });
+              } catch (progressError) {
+                console.error(
+                  "[realtime] apply_document_edits async failure",
+                  progressError,
+                );
+                await emitSystemJsonMessage("TOOL_PROGRESS", {
+                  tool: name,
+                  tool_call_id: toolCallId,
+                  status: "error",
+                  projectId,
+                  error:
+                    progressError instanceof Error
+                      ? progressError.message
+                      : String(progressError),
+                });
+              }
+            })();
+
+            result = {
+              status: "queued",
               projectId,
-              markdown: markdownValue,
-              sections: sectionPayload.map((section) => ({
-                heading: section.heading,
-                content: section.content,
-                status: section.status,
-                order: section.order,
-              })),
-            });
-            result = updated;
+              acceptedAt,
+              sections: sectionsSummary,
+              summary: summaryValue ?? null,
+            };
             success = true;
             break;
           }
@@ -1797,12 +2017,13 @@ const resolveProjectId = useCallback(
       logConnection,
       resolveProjectId,
       recordTranscriptPointerMutation,
+      resolveMessagePointer,
       submitToolResult,
       sessionRecord,
       syncBlueprintFieldMutation,
-      transcriptMessageIdsRef,
       updateTodoStatusMutation,
       updateProjectMetadataMutation,
+      emitSystemJsonMessage,
     ],
   );
 
@@ -2036,6 +2257,7 @@ const resolveProjectId = useCallback(
           noiseReduction,
           language,
           hasProjectContext: Boolean(assignedProjectId),
+          mode: instructionContext.mode,
         }),
       });
 
@@ -2180,6 +2402,7 @@ const resolveProjectId = useCallback(
     audioElementRef,
     createSessionMutation,
     handleServerEvent,
+    instructionContext.mode,
     language,
     logConnection,
     noiseReduction,
@@ -2216,6 +2439,13 @@ const resolveProjectId = useCallback(
         sessionUpdate.audio = {
           input: { noise_reduction: { type: noiseReduction } },
         };
+      }
+
+      const toolDefinitions = getToolsForMode(instructionContext.mode);
+      const toolSignature = JSON.stringify(toolDefinitions);
+      if (toolSignature !== lastToolSignatureRef.current) {
+        sessionUpdate.tools = toolDefinitions;
+        lastToolSignatureRef.current = toolSignature;
       }
 
       const instructions = buildSessionInstructions({

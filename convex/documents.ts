@@ -89,6 +89,7 @@ export const applyEdits = mutation({
     projectId: v.id("projects"),
     markdown: v.string(),
     sections: v.optional(v.array(SECTION_INPUT_VALIDATOR)),
+    summary: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -112,6 +113,7 @@ export const applyEdits = mutation({
       const documentId = await ctx.db.insert("documents", {
         projectId: args.projectId,
         latestDraftMarkdown: "",
+        summary: args.summary ?? undefined,
         status: "drafting",
         lockedSections: [],
         updatedAt: now,
@@ -125,6 +127,7 @@ export const applyEdits = mutation({
 
     await ctx.db.patch(document._id, {
       latestDraftMarkdown: args.markdown,
+      summary: typeof args.summary === "string" ? args.summary : document.summary,
       status: resolveDocumentStatus(normalizedSections),
       updatedAt: now,
     });
@@ -192,5 +195,46 @@ export const applyEdits = mutation({
       document: updatedDocument,
       sections: sorted,
     };
+  },
+});
+
+export const resetDraft = mutation({
+  args: {
+    projectId: v.id("projects"),
+  },
+  handler: async (ctx, args) => {
+    const document = await ctx.db
+      .query("documents")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .unique();
+
+    if (!document) {
+      return { document: null, sections: [] } as const;
+    }
+
+    const now = Date.now();
+
+    await ctx.db.patch(document._id, {
+      latestDraftMarkdown: "",
+      summary: undefined,
+      status: "drafting",
+      updatedAt: now,
+    });
+
+    const sections = await ctx.db
+      .query("documentSections")
+      .withIndex("by_document", (q) => q.eq("documentId", document._id))
+      .collect();
+
+    for (const section of sections) {
+      await ctx.db.delete(section._id);
+    }
+
+    const refreshed = await ctx.db.get(document._id);
+
+    return {
+      document: refreshed,
+      sections: [] as Doc<"documentSections">[],
+    } as const;
   },
 });

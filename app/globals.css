@@ -18,6 +18,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  overflow-y: scroll;
 }
 
 .app-body {
@@ -149,6 +150,23 @@ button.primary {
 button.danger {
   background: #dc2626;
   color: #f8fafc;
+}
+
+button.text-button {
+  background: transparent;
+  color: #2563eb;
+  padding: 0.35rem 0.75rem;
+  box-shadow: none;
+}
+
+button.text-button:hover {
+  background: rgba(37, 99, 235, 0.12);
+  box-shadow: none;
+  transform: none;
+}
+
+button.text-button:disabled {
+  color: #94a3b8;
 }
 
 .alert {
@@ -1047,6 +1065,16 @@ a.secondary:hover {
   color: #475569;
 }
 
+.blueprint-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.75rem;
+}
+
+.blueprint-actions .text-button {
+  font-size: 0.9rem;
+}
+
 .blueprint-status {
   display: inline-flex;
   align-items: center;
@@ -1176,8 +1204,9 @@ a.secondary:hover {
 
 .document-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
-  gap: 1.5rem;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 1.25rem;
 }
 
 @media (max-width: 1080px) {
@@ -1188,6 +1217,57 @@ a.secondary:hover {
 
 .document-panel {
   gap: 1.5rem;
+}
+
+.document-aside {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.todo-panel .panel-subtitle {
+  font-weight: 600;
+  color: #1d4ed8;
+}
+
+.detail-panel {
+  gap: 1.1rem;
+}
+
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.detail-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.detail-summary span {
+  background: #eef2ff;
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+}
+
+.detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.detail-panel.collapsed {
+  gap: 0.9rem;
+  padding-bottom: 1rem;
+}
+
+.detail-panel.collapsed .detail-body {
+  display: none;
 }
 
 .draft-metrics {
@@ -1230,6 +1310,38 @@ a.secondary:hover {
   color: #eef2ff;
 }
 
+.draft-summary {
+  background: var(--surface-subtle, #f8fafc);
+  border-radius: 16px;
+  padding: 1.2rem;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 1.5rem;
+}
+
+.draft-summary h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.draft-summary p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  color: #0f172a;
+}
+
+.draft-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.draft-header-tools .text-button {
+  min-width: 7.5rem;
+}
+
 .markdown-view {
   background: #f8fafc;
   border-radius: 16px;
@@ -1262,12 +1374,6 @@ a.secondary:hover {
   margin: 0;
   color: #64748b;
   font-style: italic;
-}
-
-.document-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
 }
 
 .outline-list {
@@ -1408,21 +1514,22 @@ a.secondary:hover {
   margin: 0;
 }
 
-.settings-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
-  gap: 1.5rem;
-  align-items: start;
+.session-layout {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding-right: clamp(160px, 14vw, 360px);
 }
 
-.settings-column {
+.session-main-column {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  width: 100%;
 }
 
 @media (max-width: 1080px) {
-  .settings-grid {
-    grid-template-columns: minmax(0, 1fr);
+  .session-layout {
+    padding-right: 0;
   }
 }

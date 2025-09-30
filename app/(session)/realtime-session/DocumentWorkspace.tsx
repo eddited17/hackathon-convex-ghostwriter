@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 
 import { api } from "@/convex/_generated/api";
@@ -162,11 +162,30 @@ export default function DocumentWorkspace({
   );
 
   const updateTodoStatus = useMutation(api.todos.updateStatus);
+  const resetDraftMutation = useMutation(api.documents.resetDraft);
 
   const openTodoCount = useMemo(() => {
     if (!todos) return 0;
     return todos.filter((todo) => todo.status !== "resolved").length;
   }, [todos]);
+
+  const [resetting, setResetting] = useState(false);
+
+  const handleResetDraft = async () => {
+    if (!projectId || resetting) return;
+    const confirmed = window.confirm(
+      "Reset the draft? This will clear all sections, summary, and Markdown for this project.",
+    );
+    if (!confirmed) return;
+    setResetting(true);
+    try {
+      await resetDraftMutation({ projectId });
+    } catch (error) {
+      console.error("Failed to reset draft", error);
+    } finally {
+      setResetting(false);
+    }
+  };
 
   useEffect(() => {
     if (!workspace || !onSnapshot) return;
@@ -202,14 +221,34 @@ export default function DocumentWorkspace({
       }));
   }, [fieldStates]);
 
+  const completedHighlights = useMemo(() => {
+    return blueprintHighlights.filter((highlight) => highlight.isComplete).length;
+  }, [blueprintHighlights]);
+
   const voiceGuardrails = blueprint?.voiceGuardrails ?? {
     tone: "",
     structure: "",
     content: "",
   };
 
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
   const documentContent = workspace?.document?.latestDraftMarkdown ?? "";
+  const draftSummary = workspace?.document?.summary?.trim() ?? "";
   const sections = workspace?.sections ?? [];
+  const noteCount = notes?.length ?? 0;
+  const blueprintSummary =
+    blueprintHighlights.length > 0
+      ? `${completedHighlights}/${blueprintHighlights.length} blueprint fields`
+      : "Blueprint pending";
+  const summaryItems = [
+    `${sections.length} ${sections.length === 1 ? "section" : "sections"}`,
+    `${openTodoCount} open ${openTodoCount === 1 ? "todo" : "todos"}`,
+    voiceGuardrails.tone || voiceGuardrails.structure || voiceGuardrails.content
+      ? "Voice cues set"
+      : "Voice cues empty",
+    blueprintSummary,
+  ];
 
   return (
     <div className="document-workspace">
@@ -222,78 +261,53 @@ export default function DocumentWorkspace({
                 Updates arrive as the assistant applies whole-document edits.
               </p>
             </div>
-            <div className="draft-metrics">
-              <span className="metric-chip">
-                {workspace ? `${workspace.progress.wordCount} words` : "—"}
-              </span>
-              <span
-                className={`metric-chip status-${workspace?.document?.status ?? "drafting"}`}
-              >
-                {workspace?.document?.status ?? "drafting"}
-              </span>
-              {workspace?.document?.updatedAt ? (
-                <span className="metric-chip subtle">
-                  Updated {formatDateTime(workspace.document.updatedAt)}
+            <div className="draft-header-tools">
+              <div className="draft-metrics">
+                <span className="metric-chip">
+                  {workspace ? `${workspace.progress.wordCount} words` : "—"}
                 </span>
-              ) : null}
+                <span
+                  className={`metric-chip status-${workspace?.document?.status ?? "drafting"}`}
+                >
+                  {workspace?.document?.status ?? "drafting"}
+                </span>
+                {workspace?.document?.updatedAt ? (
+                  <span className="metric-chip subtle">
+                    Updated {formatDateTime(workspace.document.updatedAt)}
+                  </span>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                className="text-button danger"
+                onClick={handleResetDraft}
+                disabled={!projectId || resetting}
+              >
+                {resetting ? "Resetting…" : "Reset draft"}
+              </button>
             </div>
           </header>
+          {draftSummary ? (
+            <section className="draft-summary">
+              <h3>Summary</h3>
+              <p>{draftSummary}</p>
+            </section>
+          ) : null}
           <SimpleMarkdown content={documentContent} />
         </section>
-        <aside className="panel document-sidebar">
-          <section>
-            <h3>Section outline</h3>
-            {sections.length === 0 ? (
-              <p className="empty-state">
-                Sections will populate after the first drafting pass.
-              </p>
-            ) : (
-              <ol className="outline-list">
-                {sections.map((section) => (
-                  <li key={section._id}>
-                    <div>
-                      <span className="outline-title">{section.heading}</span>
-                      <span className={`outline-status status-${section.status}`}>
-                        {SECTION_STATUS_LABELS[section.status] ?? section.status}
-                      </span>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
-          <section>
-            <h3>Voice guardrails</h3>
-            <ul className="voice-list">
-              <li>
-                <span className="voice-label">Tone</span>
-                <p>{voiceGuardrails.tone || "—"}</p>
-              </li>
-              <li>
-                <span className="voice-label">Structure</span>
-                <p>{voiceGuardrails.structure || "—"}</p>
-              </li>
-              <li>
-                <span className="voice-label">Content boundaries</span>
-                <p>{voiceGuardrails.content || "—"}</p>
-              </li>
-            </ul>
-          </section>
-          <section>
-            <h3>Blueprint highlights</h3>
-            <ul className="blueprint-highlights">
-              {blueprintHighlights.map((highlight) => (
-                <li key={highlight.key}>
-                  <span className="highlight-label">{highlight.label}</span>
-                  <p className={highlight.isComplete ? "" : "muted"}>
-                    {highlight.value || "Pending"}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          </section>
-          <section>
-            <h3>Open TODOs</h3>
+        <aside className="document-aside">
+          <section className="panel todo-panel">
+            <header className="panel-header">
+              <div>
+                <h2>Open TODOs</h2>
+                <p className="panel-description">
+                  Capture outstanding follow-ups before sharing the draft.
+                </p>
+              </div>
+              <span className="panel-subtitle">
+                {openTodoCount} open
+              </span>
+            </header>
             {todos && todos.length > 0 ? (
               <ul className="todo-list">
                 {todos.map((todo) => (
@@ -305,7 +319,14 @@ export default function DocumentWorkspace({
                       </span>
                     </div>
                     <div className="todo-actions">
-                      {todo.status !== "resolved" ? (
+                      {todo.status === "resolved" ? (
+                        <button
+                          type="button"
+                          onClick={() => handleTodoUpdate(todo._id, "open")}
+                        >
+                          Reopen
+                        </button>
+                      ) : (
                         <>
                           {todo.status !== "in_review" ? (
                             <button
@@ -319,16 +340,9 @@ export default function DocumentWorkspace({
                             type="button"
                             onClick={() => handleTodoUpdate(todo._id, "resolved")}
                           >
-                            Mark resolved
+                            Resolve
                           </button>
                         </>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleTodoUpdate(todo._id, "open")}
-                        >
-                          Reopen
-                        </button>
                       )}
                     </div>
                   </li>
@@ -340,35 +354,115 @@ export default function DocumentWorkspace({
               </p>
             )}
           </section>
-          <section>
-            <h3>Recent notes</h3>
-            {notes && notes.length > 0 ? (
-              <ul className="note-list">
-                {notes.map((note) => (
-                  <li key={note._id}>
-                    <div>
-                      <span className={`note-type type-${note.noteType}`}>
-                        {NOTE_LABELS[note.noteType] ?? note.noteType}
-                      </span>
-                      {note.resolved ? (
-                        <span className="note-resolved">Resolved</span>
-                      ) : null}
-                    </div>
-                    <p>{note.content}</p>
-                    {note.sourceMessageIds?.length ? (
-                      <span className="note-source">
-                        Anchored to {note.sourceMessageIds.length} transcript
-                        message(s)
-                      </span>
-                    ) : null}
+
+          <section
+            className={`panel detail-panel ${detailsOpen ? "open" : "collapsed"}`}
+          >
+            <header className="detail-header">
+              <div>
+                <h2>Session details</h2>
+                <p className="panel-description">
+                  Outline, voice guardrails, blueprint status, and notes in one place.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => setDetailsOpen((previous) => !previous)}
+              >
+                {detailsOpen ? "Hide details" : "Show details"}
+              </button>
+            </header>
+            <div className="detail-summary">
+              {summaryItems.map((item) => (
+                <span key={item}>{item}</span>
+              ))}
+              <span>
+                {noteCount} {noteCount === 1 ? "note" : "notes"}
+              </span>
+            </div>
+            <div className="detail-body">
+              <section>
+                <h3>Section outline</h3>
+                {sections.length === 0 ? (
+                  <p className="empty-state">
+                    Sections will populate after the first drafting pass.
+                  </p>
+                ) : (
+                  <ol className="outline-list">
+                    {sections.map((section) => (
+                      <li key={section._id}>
+                        <div>
+                          <span className="outline-title">{section.heading}</span>
+                          <span className={`outline-status status-${section.status}`}>
+                            {SECTION_STATUS_LABELS[section.status] ?? section.status}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
+              <section>
+                <h3>Voice guardrails</h3>
+                <ul className="voice-list">
+                  <li>
+                    <span className="voice-label">Tone</span>
+                    <p>{voiceGuardrails.tone || "—"}</p>
                   </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="empty-state">
-                Notes you capture during the session will land here.
-              </p>
-            )}
+                  <li>
+                    <span className="voice-label">Structure</span>
+                    <p>{voiceGuardrails.structure || "—"}</p>
+                  </li>
+                  <li>
+                    <span className="voice-label">Content boundaries</span>
+                    <p>{voiceGuardrails.content || "—"}</p>
+                  </li>
+                </ul>
+              </section>
+              <section>
+                <h3>Blueprint highlights</h3>
+                <ul className="blueprint-highlights">
+                  {blueprintHighlights.map((highlight) => (
+                    <li key={highlight.key}>
+                      <span className="highlight-label">{highlight.label}</span>
+                      <p className={highlight.isComplete ? "" : "muted"}>
+                        {highlight.value || "Pending"}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+              <section>
+                <h3>Recent notes</h3>
+                {notes && notes.length > 0 ? (
+                  <ul className="note-list">
+                    {notes.map((note) => (
+                      <li key={note._id}>
+                        <div>
+                          <span className={`note-type type-${note.noteType}`}>
+                            {NOTE_LABELS[note.noteType] ?? note.noteType}
+                          </span>
+                          {note.resolved ? (
+                            <span className="note-resolved">Resolved</span>
+                          ) : null}
+                        </div>
+                        <p>{note.content}</p>
+                        {note.sourceMessageIds?.length ? (
+                          <span className="note-source">
+                            Anchored to {note.sourceMessageIds.length} transcript message(s)
+                          </span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="empty-state">
+                    Notes you capture during the session will land here.
+                  </p>
+                )}
+              </section>
+            </div>
           </section>
         </aside>
       </div>

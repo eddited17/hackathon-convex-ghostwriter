@@ -95,6 +95,7 @@ export default defineSchema({
   documents: defineTable({
     projectId: v.id("projects"),
     latestDraftMarkdown: v.optional(v.string()),
+    summary: v.optional(v.string()),
     status: v.string(),
     lockedSections: v.optional(v.array(v.string())),
     updatedAt: v.number()

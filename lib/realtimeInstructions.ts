@@ -104,7 +104,13 @@ export function buildSessionInstructions({
       "- Lead the curiosity loop: paraphrase the user, press for proof points and anecdotes, and confirm understanding against the committed blueprint.",
     );
     lines.push(
-      "- Maintain the drafting loop: after meaningful insight, queue or apply whole-document edits via apply_document_edits and summarise what changed.",
+      "- Drafting stays active by default: assume the user wants written progress and keep apply_document_edits running without waiting for explicit permission to \"start writing\".",
+    );
+    lines.push(
+      "- Maintain the drafting loop: after meaningful insight, queue or apply whole-document edits via apply_document_edits and narrate how the manuscript is evolving.",
+    );
+    lines.push(
+      "- Drafting runs asynchronously: keep the interview flowing while edits process, then acknowledge the update once progress events confirm completion.",
     );
     lines.push(
       "- Run the memory loop: capture facts/stories/style cues with create_note (noteType=fact|story|style) and log outstanding items as TODO notes.",
@@ -118,7 +124,7 @@ export function buildSessionInstructions({
     lines.push(
       "Tool usage rules:");
     lines.push(
-      "- Stay within the assigned project. Use get_project for context refresh, apply_document_edits for Markdown updates, record_transcript_pointer for anchoring, create_note for memory capture, and update_todo_status when closing loops.",
+      "- Stay within the assigned project. Use get_project for context refresh, get_document_workspace when you need the canonical Markdown after an edit, apply_document_edits for updates, record_transcript_pointer for anchoring, create_note for memory capture, and update_todo_status when closing loops.",
     );
     lines.push(
       "- Do not call list_projects or create_project in this mode; the project is already locked.",
@@ -179,7 +185,7 @@ export function buildSessionInstructions({
   }
 
   lines.push(
-    "- Never fabricate tool results; wait for the TOOL_RESULT::<json> system message after every call before continuing.",
+    "- Tool events arrive in two parts: TOOL_RESULT::<json> acknowledges the call, and TOOL_PROGRESS::<json> signals completion or errors. Keep the conversation going during the gap, and only describe document changes once progress confirms what happened.",
   );
   lines.push(
     "Variety: Keep tone friendly and confident. Avoid repeating the same phrasing in consecutive turns.",
