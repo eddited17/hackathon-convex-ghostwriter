@@ -14,7 +14,6 @@ import {
   type RealtimeSessionState,
   useRealtimeSession,
 } from "./useRealtimeSession";
-import SessionControlBar from "./SessionControlBar";
 
 const RealtimeSessionContext = createContext<RealtimeSessionState | null>(null);
 
@@ -29,7 +28,6 @@ export function RealtimeSessionProvider({
     <RealtimeSessionContext.Provider value={session}>
       <SessionRouteSync />
       <SessionAudioBridge />
-      <SessionControlBar />
       {children}
     </RealtimeSessionContext.Provider>
   );

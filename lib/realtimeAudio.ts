@@ -22,6 +22,91 @@ export const NOISE_REDUCTION_OPTIONS: Array<{
   },
 ];
 
+export type TurnDetectionConfig =
+  | {
+      type: "semantic_vad";
+      eagerness?: "low" | "medium" | "high" | "auto";
+    }
+  | {
+      type: "server_vad";
+      threshold?: number;
+      prefix_padding_ms?: number;
+      silence_duration_ms?: number;
+    };
+
+export type TurnDetectionPreset =
+  | "semantic_low"
+  | "semantic_medium"
+  | "semantic_high"
+  | "semantic_auto"
+  | "server_default";
+
+export type TurnDetectionOption = {
+  value: TurnDetectionPreset;
+  label: string;
+  description: string;
+  config: TurnDetectionConfig;
+};
+
+export const TURN_DETECTION_OPTIONS: TurnDetectionOption[] = [
+  {
+    value: "semantic_low",
+    label: "Semantic (patient)",
+    description: "Waits for natural pauses before replying; minimizes interruptions.",
+    config: { type: "semantic_vad", eagerness: "low" },
+  },
+  {
+    value: "semantic_medium",
+    label: "Semantic (balanced)",
+    description: "Balances responsiveness with giving the speaker room to finish.",
+    config: { type: "semantic_vad", eagerness: "medium" },
+  },
+  {
+    value: "semantic_high",
+    label: "Semantic (quick)",
+    description: "Responds as soon as it detects intent; best for rapid back-and-forth.",
+    config: { type: "semantic_vad", eagerness: "high" },
+  },
+  {
+    value: "semantic_auto",
+    label: "Semantic (auto)",
+    description: "Let the model adapt turn-taking dynamically during the call.",
+    config: { type: "semantic_vad", eagerness: "auto" },
+  },
+  {
+    value: "server_default",
+    label: "Silence detection",
+    description: "Use server-side silence thresholding (OpenAI default behaviour).",
+    config: {
+      type: "server_vad",
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 500,
+    },
+  },
+];
+
+export const DEFAULT_TURN_DETECTION_PRESET: TurnDetectionPreset = "semantic_low";
+
+export const getTurnDetectionConfig = (
+  preset: TurnDetectionPreset,
+): TurnDetectionConfig => {
+  const option = TURN_DETECTION_OPTIONS.find((entry) => entry.value === preset);
+  const fallback = TURN_DETECTION_OPTIONS[0];
+  const source = option ?? fallback;
+
+  if (source.config.type === "semantic_vad") {
+    return { type: "semantic_vad", eagerness: source.config.eagerness };
+  }
+
+  return {
+    type: "server_vad",
+    threshold: source.config.threshold,
+    prefix_padding_ms: source.config.prefix_padding_ms,
+    silence_duration_ms: source.config.silence_duration_ms,
+  };
+};
+
 export interface VoiceActivityState {
   user: boolean;
   assistant: boolean;

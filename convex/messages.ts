@@ -9,14 +9,38 @@ export const appendMessage = mutation({
     transcript: v.string(),
     timestamp: v.number(),
     eventId: v.optional(v.string()),
+    itemId: v.optional(v.string()),
+    role: v.optional(v.string()),
+    text: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tags = new Set<string>();
+    if (args.eventId) {
+      tags.add(args.eventId);
+    }
+    if (args.itemId) {
+      tags.add(args.itemId);
+      const trimmed = args.itemId.trim();
+      const hyphenIndex = trimmed.indexOf("-");
+      if (hyphenIndex > 0 && hyphenIndex < trimmed.length - 1) {
+        tags.add(trimmed.slice(hyphenIndex + 1));
+      }
+      if (!trimmed.startsWith("assistant-")) {
+        tags.add(`assistant-${trimmed}`);
+      }
+      if (!trimmed.startsWith("user-")) {
+        tags.add(`user-${trimmed}`);
+      }
+    }
+
     const messageId = await ctx.db.insert("messages", {
       sessionId: args.sessionId,
       speaker: args.speaker,
       transcript: args.transcript,
       timestamp: args.timestamp,
-      tags: args.eventId ? [args.eventId] : undefined,
+      tags: tags.size > 0 ? Array.from(tags) : undefined,
+      role: args.role ?? args.speaker,
+      text: args.text ?? args.transcript,
     });
     return { messageId };
   },

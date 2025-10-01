@@ -4,206 +4,41 @@ import {
   DEFAULT_LANGUAGE_OPTION,
   findLanguageOption,
 } from "@/lib/languages";
-import { buildSessionInstructions } from "@/lib/realtimeInstructions";
+import {
+  buildSessionInstructions,
+  type SessionInstructionMode,
+} from "@/lib/realtimeInstructions";
+import {
+  getInitialToolList,
+  isSessionInstructionMode,
+} from "@/lib/realtimeTools";
 
 type NoiseReduction = "default" | "near_field" | "far_field";
+
+type TurnDetectionPayload =
+  | {
+      type: "semantic_vad";
+      eagerness?: "low" | "medium" | "high" | "auto";
+    }
+  | {
+      type: "server_vad";
+      threshold?: number;
+      prefix_padding_ms?: number;
+      silence_duration_ms?: number;
+    };
 
 type SecretRequest = {
   noiseReduction?: NoiseReduction;
   voice?: string;
   language?: string;
   hasProjectContext?: boolean;
+  mode?: SessionInstructionMode;
+  turnDetection?: TurnDetectionPayload;
 };
 
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/realtime/client_secrets";
 const DEFAULT_MODEL = process.env.OPENAI_REALTIME_MODEL ?? "gpt-realtime";
 const DEFAULT_VOICE = process.env.OPENAI_REALTIME_VOICE ?? "marin";
-
-const TOOL_DEFINITIONS = [
-  {
-    type: "function",
-    name: "list_projects",
-    description:
-      "Return projects owned by the sandbox user (newest first). Each item includes `projectId`, full `project` metadata, optional `blueprint`, and a `summary.missingFields` array. Use the returned `projectId` when calling other project tools.",
-    parameters: {
-      type: "object",
-      properties: {
-        limit: {
-          type: "integer",
-          minimum: 1,
-          maximum: 50,
-          description: "Maximum number of projects to return (default 20).",
-        },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "get_project",
-    description:
-      "Load a single project and blueprint so you can continue with the latest data. Response mirrors `list_projects` with `projectId`, `project`, `blueprint`, and `summary` fields.",
-    parameters: {
-      type: "object",
-      properties: {
-        projectId: {
-          type: "string",
-          description: "Convex document id for the project (e.g. project_...).",
-        },
-      },
-      required: ["projectId"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "create_project",
-    description:
-      "Create a brand-new project record and accompanying blueprint draft. Response mirrors `list_projects` so you can continue using the new `projectId` immediately.",
-    parameters: {
-      type: "object",
-      properties: {
-        title: {
-          type: "string",
-          description: "Display name for the project.",
-        },
-        contentType: {
-          type: "string",
-          description:
-            "Requested deliverable type (article, blog, newsletter, etc.).",
-        },
-        goal: {
-          type: "string",
-          description:
-            "Optional short description of the user’s high-level objective.",
-        },
-      },
-      required: ["title", "contentType"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "update_project_metadata",
-    description:
-      "Update core project fields as the user clarifies title, content type, goal, or status. Returns the updated project bundle with `projectId`, `project`, `blueprint`, and `summary`.",
-    parameters: {
-      type: "object",
-      properties: {
-        projectId: {
-          type: "string",
-          description: "Project id to update.",
-        },
-        title: {
-          type: "string",
-          description: "New project title, if changed.",
-        },
-        contentType: {
-          type: "string",
-          description: "New deliverable type.",
-        },
-        goal: {
-          type: "string",
-          description: "Updated goal statement.",
-        },
-        status: {
-          type: "string",
-          enum: ["draft", "active", "archived", "intake"],
-          description: "Optional status override for the project lifecycle.",
-        },
-      },
-      required: ["projectId"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "sync_blueprint_field",
-    description:
-      "Write an updated value for a single blueprint intake field after confirming details with the user. Returns the refreshed project bundle so you can confirm the change.",
-    parameters: {
-      type: "object",
-      properties: {
-        projectId: {
-          type: "string",
-          description: "Project id whose blueprint should be patched.",
-        },
-        field: {
-          type: "string",
-          enum: [
-            "desiredOutcome",
-            "targetAudience",
-            "publishingPlan",
-            "timeline",
-            "materialsInventory",
-            "communicationPreferences",
-            "budgetRange",
-            "voiceGuardrails",
-          ],
-          description: "Blueprint field identifier to update.",
-        },
-        value: {
-          description:
-            "New value for the field. Use an object with tone/structure/content for voiceGuardrails; otherwise pass a string.",
-          anyOf: [
-            { type: "string" },
-            {
-              type: "object",
-              properties: {
-                tone: { type: "string" },
-                structure: { type: "string" },
-                content: { type: "string" },
-              },
-              additionalProperties: false,
-            },
-            { type: "null" },
-          ],
-        },
-        transcriptId: {
-          type: "string",
-          description:
-            "Optional transcript fragment identifier that produced this value.",
-        },
-      },
-      required: ["projectId", "field"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "commit_blueprint",
-    description:
-      "Mark the blueprint as committed once all required information is captured and ready for drafting. Returns the committed project bundle.",
-    parameters: {
-      type: "object",
-      properties: {
-        projectId: {
-          type: "string",
-          description: "Project id whose blueprint should be committed.",
-        },
-      },
-      required: ["projectId"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "assign_project_to_session",
-    description:
-      "Associate the current realtime session with the selected project so future transcript events are tagged correctly.",
-    parameters: {
-      type: "object",
-      properties: {
-        projectId: {
-          type: "string",
-          description: "Project id that should become active for the session.",
-        },
-      },
-      required: ["projectId"],
-      additionalProperties: false,
-    },
-  },
-];
 
 const isValidNoiseReduction = (
   value: unknown,
@@ -236,6 +71,9 @@ export async function POST(request: Request) {
     if (typeof body?.hasProjectContext === "boolean") {
       payload.hasProjectContext = body.hasProjectContext;
     }
+    if (isSessionInstructionMode(body?.mode)) {
+      payload.mode = body.mode;
+    }
   } catch (parseError) {
     // Ignore malformed JSON; fall back to defaults.
   }
@@ -243,40 +81,102 @@ export async function POST(request: Request) {
   const selectedLanguage = findLanguageOption(
     payload.language ?? DEFAULT_LANGUAGE_OPTION.value,
   );
-  const sessionConfig: Record<string, unknown> = {
-    type: "realtime",
-    model: DEFAULT_MODEL,
-    audio: {
+  const inferredProjectContext =
+    payload.hasProjectContext ??
+    (payload.mode ? payload.mode !== "intake" : undefined);
+  const hasProjectContext = Boolean(inferredProjectContext);
+  const resolvedMode: SessionInstructionMode = payload.mode
+    ? payload.mode
+    : hasProjectContext
+      ? "blueprint"
+      : "intake";
+  const tools = getInitialToolList({
+    mode: resolvedMode,
+    hasProjectContext,
+  });
+  const instructions = buildSessionInstructions({
+    language: selectedLanguage,
+    hasProjectContext,
+    mode: resolvedMode,
+  });
+
+  const buildSessionConfig = (includeTurnDetection: boolean) => {
+    const audioConfig: Record<string, unknown> = {
       output: {
         voice: payload.voice ?? DEFAULT_VOICE,
       },
-    },
-    instructions: buildSessionInstructions({
-      language: selectedLanguage,
-      hasProjectContext: Boolean(payload.hasProjectContext),
-    }),
-    tools: TOOL_DEFINITIONS,
-  };
-
-  if (payload.noiseReduction && payload.noiseReduction !== "default") {
-    (sessionConfig.audio as Record<string, unknown>).input = {
-      noise_reduction: { type: payload.noiseReduction },
     };
-  }
 
-  const requestBody: Record<string, unknown> = {
-    session: sessionConfig,
+    if (payload.noiseReduction && payload.noiseReduction !== "default") {
+      audioConfig.input = {
+        noise_reduction: { type: payload.noiseReduction },
+      };
+    }
+
+    const sessionConfig: Record<string, unknown> = {
+      type: "realtime",
+      model: DEFAULT_MODEL,
+      audio: audioConfig,
+      instructions,
+      tools,
+    };
+
+    if (includeTurnDetection && payload.turnDetection) {
+      sessionConfig.turn_detection =
+        payload.turnDetection.type === "semantic_vad"
+          ? {
+              type: "semantic_vad",
+              eagerness: payload.turnDetection.eagerness,
+            }
+          : {
+              type: "server_vad",
+              threshold: payload.turnDetection.threshold,
+              prefix_padding_ms: payload.turnDetection.prefix_padding_ms,
+              silence_duration_ms: payload.turnDetection.silence_duration_ms,
+            };
+    }
+
+    return sessionConfig;
   };
 
-  try {
-    const response = await fetch(OPENAI_ENDPOINT, {
+  const createClientSecret = async (sessionConfig: Record<string, unknown>) => {
+    return fetch(OPENAI_ENDPOINT, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({ session: sessionConfig }),
     });
+  };
+
+  try {
+    const includeTurnDetection = Boolean(payload.turnDetection);
+    let response = await createClientSecret(
+      buildSessionConfig(includeTurnDetection),
+    );
+
+    if (!response.ok && payload.turnDetection) {
+      const detail = await response.text();
+      console.warn(
+        "[realtime] turn_detection rejected during secret creation; retrying without custom config",
+        {
+          status: response.status,
+          detail,
+        },
+      );
+      response = await createClientSecret(buildSessionConfig(false));
+      if (!response.ok) {
+        const fallbackDetail = await response.text();
+        return NextResponse.json(
+          {
+            error: "Failed to create realtime client secret",
+            detail: fallbackDetail,
+          },
+          { status: response.status },
+        );
+      }
+    }
 
     if (!response.ok) {
       const detail = await response.text();

@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useConvex, useMutation, useQuery } from "convex/react";
 
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
 import {
   BLUEPRINT_FIELD_DEFINITIONS,
   BLUEPRINT_FIELD_ORDER,
+  REQUIRED_BLUEPRINT_FIELDS,
   blueprintFieldHasValue,
   normalizeTextValue,
   type BlueprintFieldDefinition,
@@ -18,7 +19,6 @@ import type { TranscriptionFragment } from "@/lib/realtimeAudio";
 import type {
   RealtimeSessionState,
   SessionStatus,
-  StartSessionOptions,
 } from "./useRealtimeSession";
 
 type IntakePhase =
@@ -31,6 +31,210 @@ type IntakePhase =
 type ProjectListEntry = {
   project: Doc<"projects">;
   blueprint: Doc<"projectBlueprints"> | null;
+};
+
+type DocumentWorkspaceSnapshot = {
+  document: Doc<"documents"> | null;
+  sections: Doc<"documentSections">[];
+  progress: {
+    wordCount: number;
+    sectionStatuses: Array<{
+      sectionId: Id<"documentSections">;
+      heading: string;
+      status: "drafting" | "needs_detail" | "complete";
+      order: number;
+    }>;
+  };
+};
+
+const MAX_DRAFT_PREVIEW_CHARS = 3500;
+
+const MISSING_VALUE_LABEL = "[missing]";
+
+const formatBlueprintSnapshot = (
+  blueprint: Doc<"projectBlueprints"> | null,
+) => {
+  if (!blueprint) {
+    return ["- No blueprint captured yet."];
+  }
+
+  const lines: string[] = [];
+
+  for (const fieldKey of BLUEPRINT_FIELD_ORDER) {
+    const definition = BLUEPRINT_FIELD_DEFINITIONS.find(
+      (entry) => entry.key === fieldKey,
+    );
+    if (!definition) continue;
+
+    switch (fieldKey) {
+      case "voiceGuardrails": {
+        const voice = blueprint.voiceGuardrails;
+        const tone = normalizeTextValue(voice?.tone);
+        const structure = normalizeTextValue(voice?.structure);
+        const content = normalizeTextValue(voice?.content);
+        if (!tone && !structure && !content) {
+          lines.push("- Voice guardrails: [missing]");
+          break;
+        }
+        if (tone) {
+          lines.push(`- Voice guardrails (tone): ${tone}`);
+        }
+        if (structure) {
+          lines.push(`- Voice guardrails (structure): ${structure}`);
+        }
+        if (content) {
+          lines.push(`- Voice guardrails (content): ${content}`);
+        }
+        break;
+      }
+      case "desiredOutcome": {
+        const value = normalizeTextValue(blueprint.desiredOutcome);
+        lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
+        break;
+      }
+      case "targetAudience": {
+        const value = normalizeTextValue(blueprint.targetAudience);
+        lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
+        break;
+      }
+      case "materialsInventory": {
+        const value = normalizeTextValue(blueprint.materialsInventory);
+        lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
+        break;
+      }
+      case "communicationPreferences": {
+        const value = normalizeTextValue(blueprint.communicationPreferences);
+        lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return lines;
+};
+
+const summarizeDraftSections = (
+  sections: DocumentWorkspaceSnapshot["progress"]["sectionStatuses"],
+) => {
+  if (!sections?.length) return "";
+  const needsDetail: string[] = [];
+  const drafting: string[] = [];
+  const complete: string[] = [];
+
+  for (const section of sections) {
+    const heading = section.heading;
+    switch (section.status) {
+      case "needs_detail":
+        needsDetail.push(heading);
+        break;
+      case "drafting":
+        drafting.push(heading);
+        break;
+      case "complete":
+        complete.push(heading);
+        break;
+      default:
+        break;
+    }
+  }
+
+  const parts: string[] = [];
+  if (needsDetail.length) {
+    parts.push(`needs detail: ${needsDetail.join(", ")}`);
+  }
+  if (drafting.length) {
+    parts.push(`drafting: ${drafting.join(", ")}`);
+  }
+  if (complete.length) {
+    parts.push(`complete: ${complete.join(", ")}`);
+  }
+  return parts.join("; ");
+};
+
+const formatTodoSnapshot = (todos: Doc<"todos">[] | null | undefined) => {
+  const openTodos = (todos ?? []).filter((todo) => todo.status !== "resolved");
+  if (openTodos.length === 0) {
+    return {
+      count: 0,
+      lines: ["- No open TODOs."],
+    };
+  }
+
+  const displayLimit = 5;
+  const lines = openTodos.slice(0, displayLimit).map((todo, index) => {
+    const label = todo.label.trim();
+    return `${index + 1}. ${label || "(no label)"} (${todo.status})`;
+  });
+
+  if (openTodos.length > displayLimit) {
+    lines.push(
+      `… and ${openTodos.length - displayLimit} more open TODO${
+        openTodos.length - displayLimit === 1 ? "" : "s"
+      }.`,
+    );
+  }
+
+  return {
+    count: openTodos.length,
+    lines,
+  };
+};
+
+const buildProjectSnapshotMessage = ({
+  projectName,
+  blueprint,
+  workspace,
+  todos,
+}: {
+  projectName: string;
+  blueprint: Doc<"projectBlueprints"> | null;
+  workspace: DocumentWorkspaceSnapshot | null | undefined;
+  todos: Doc<"todos">[] | null | undefined;
+}) => {
+  const sections: string[] = [];
+  sections.push(`Context snapshot for "${projectName}":`);
+
+  const blueprintLines = formatBlueprintSnapshot(blueprint);
+  if (blueprintLines.length > 0) {
+    sections.push(["Blueprint overview:", ...blueprintLines.map((line) => `  ${line}`)].join("\n"));
+  }
+
+  const todoSummary = formatTodoSnapshot(todos);
+  sections.push(
+    [`Open TODOs (${todoSummary.count}):`, ...todoSummary.lines.map((line) => `  ${line}`)].join("\n"),
+  );
+
+  const wordCount = workspace?.progress.wordCount ?? 0;
+  const sectionSummary = summarizeDraftSections(workspace?.progress.sectionStatuses ?? []);
+  const sectionText = sectionSummary ? `; sections: ${sectionSummary}` : "";
+
+  const rawMarkdown = workspace?.document?.latestDraftMarkdown ?? "";
+  const trimmedMarkdown = rawMarkdown.trim();
+  const summaryText = workspace?.document?.summary?.trim();
+
+  if (summaryText) {
+    sections.push(`Draft summary:\n${summaryText}`);
+  } else {
+    sections.push("Draft summary: _Not captured yet._");
+  }
+
+  if (trimmedMarkdown) {
+    const truncated = trimmedMarkdown.length > MAX_DRAFT_PREVIEW_CHARS;
+    const preview = truncated
+      ? `${trimmedMarkdown.slice(0, MAX_DRAFT_PREVIEW_CHARS)}\n… trimmed for brevity.`
+      : trimmedMarkdown;
+    sections.push(
+      `Document progress: ${wordCount} words${sectionText}.\nCurrent draft:\n\`\`\`markdown\n${preview}\n\`\`\``,
+    );
+  } else {
+    sections.push(
+      `Document progress: ${wordCount} words${sectionText}.\nCurrent draft: _No saved content yet._`,
+    );
+  }
+
+  return sections.join("\n\n");
 };
 
 type FieldActivity = {
@@ -101,12 +305,10 @@ const detectProjectByText = (
 interface UseProjectIntakeFlowOptions {
   transcripts: TranscriptionFragment[];
   status: SessionStatus;
-  startSession: (options?: StartSessionOptions) => Promise<void>;
   sendTextMessage: RealtimeSessionState["sendTextMessage"];
   sessionRecord: RealtimeSessionState["sessionRecord"];
   assignProjectToSession: RealtimeSessionState["assignProjectToSession"];
   resolveMessageId: RealtimeSessionState["resolveMessageId"];
-  ingestProjects: RealtimeSessionState["ingestProjects"];
   onNavigateToProject?: (projectId: Id<"projects">) => void;
   initialProjectId?: Id<"projects"> | null;
 }
@@ -132,6 +334,7 @@ export interface ProjectIntakeState {
   chooseExistingMode: () => Promise<void>;
   startNewProject: () => Promise<void>;
   openProject: (projectId: Id<"projects">) => Promise<void>;
+  clearProject: () => void;
   setActiveFieldKey: (key: BlueprintFieldKey | null, manual?: boolean) => void;
   updateField: (key: BlueprintFieldKey, value: string) => Promise<void>;
   updateVoiceGuardrails: (value: VoiceGuardrails) => Promise<void>;
@@ -141,21 +344,23 @@ export interface ProjectIntakeState {
     goal?: string;
   }) => Promise<void>;
   isBlueprintComplete: boolean;
+  isBlueprintBypassed: boolean;
   commitBlueprint: () => Promise<void>;
+  skipBlueprint: () => Promise<void>;
+  resumeBlueprint: () => Promise<void>;
 }
 
 export function useProjectIntakeFlow({
   transcripts,
   status,
-  startSession,
   sendTextMessage,
   sessionRecord,
   assignProjectToSession,
   resolveMessageId,
-  ingestProjects,
   onNavigateToProject,
   initialProjectId,
 }: UseProjectIntakeFlowOptions): ProjectIntakeState {
+  const convex = useConvex();
   const projects = useQuery(api.projects.listProjects, { limit: 20 });
   const [phase, setPhase] = useState<IntakePhase>("idle");
   const [modeIntent, setModeIntent] = useState<"new" | "existing" | null>(
@@ -176,10 +381,12 @@ export function useProjectIntakeFlow({
   const [fieldActivity, setFieldActivity] = useState<
     Partial<Record<BlueprintFieldKey, FieldActivity>>
   >({});
+  const [blueprintBypassed, setBlueprintBypassed] = useState(false);
   const manualFocusRef = useRef(false);
   const modeTranscriptIdsRef = useRef(new Set<string>());
   const existingTranscriptIdsRef = useRef(new Set<string>());
   const fieldTranscriptIdsRef = useRef(new Set<string>());
+  const skipBlueprintTranscriptIdsRef = useRef(new Set<string>());
   const providedProjectListRef = useRef(false);
 
   const createProjectMutation = useMutation(api.projects.createProject);
@@ -237,6 +444,7 @@ export function useProjectIntakeFlow({
     existingTranscriptIdsRef.current.clear();
     fieldTranscriptIdsRef.current.clear();
     navigateToProjectRef.current?.(projectIdFromSession);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionRecord?.projectId]);
 
   const projectsList = useMemo<ProjectListEntry[]>(
@@ -244,10 +452,8 @@ export function useProjectIntakeFlow({
     [projects],
   );
 
-  useEffect(() => {
-    if (!projectsList.length) return;
-    ingestProjects(projectsList);
-  }, [ingestProjects, projectsList]);
+  // REMOVED: Automatic ingestProjects calls that were polluting the conversation
+  // The assistant will explicitly call list_projects/get_project ONLY when needed
 
   const isProjectContextHydrated = useMemo(() => {
     if (!selectedProjectId) return true;
@@ -256,34 +462,35 @@ export function useProjectIntakeFlow({
   }, [activeProject, isProjectDetailLoading, selectedProjectId]);
 
   const ensureSessionForProject = useCallback(
-    async (projectId: Id<"projects">, options?: StartSessionOptions) => {
+    async (projectId: Id<"projects">) => {
       if (status === "connected" && sessionRecord?.sessionId) {
         if (sessionRecord.projectId !== projectId) {
           await assignProjectToSession(projectId);
         }
         return;
       }
-      await startSession({ projectId, ...options });
+      // Session not active - project will be assigned on next start
     },
-    [assignProjectToSession, sessionRecord, startSession, status],
+    [assignProjectToSession, sessionRecord, status],
   );
 
   const beginConversation = useCallback(async () => {
     modeTranscriptIdsRef.current.clear();
     existingTranscriptIdsRef.current.clear();
     fieldTranscriptIdsRef.current.clear();
+    skipBlueprintTranscriptIdsRef.current.clear();
     providedProjectListRef.current = false;
     setModeIntent(null);
     setSelectedProjectId(null);
     setActiveProject(null);
     setBlueprint(null);
-    await startSession({ deferProject: true });
+    setBlueprintBypassed(false);
     setPhase("mode-selection");
     await sendTextMessage(
-      "Let’s begin! Greet the user warmly and ask if they’d like to create a new project or continue an existing one.",
+      "Let's begin! Greet the user warmly and ask if they'd like to create a new project or continue an existing one.",
       { skipPersist: true },
     );
-  }, [sendTextMessage, startSession]);
+  }, [sendTextMessage]);
 
   const startNewProject = useCallback(async () => {
     if (modeIntent !== "new") {
@@ -300,8 +507,10 @@ export function useProjectIntakeFlow({
     setActiveProject(created.project);
     setBlueprint(created.blueprint);
     setPhase("blueprint");
+    setBlueprintBypassed(false);
     manualFocusRef.current = false;
     fieldTranscriptIdsRef.current.clear();
+    skipBlueprintTranscriptIdsRef.current.clear();
     await ensureSessionForProject(created.project._id);
     await sendTextMessage(
       "We’re starting a fresh project. Let the user know we’ll capture the project blueprint step by step.",
@@ -338,21 +547,33 @@ export function useProjectIntakeFlow({
       setModeIntent(null);
       manualFocusRef.current = false;
       fieldTranscriptIdsRef.current.clear();
+      skipBlueprintTranscriptIdsRef.current.clear();
+
+      // SIMPLE LOGIC: Only enter blueprint if it's COMPLETELY empty
+      const blueprintIsCompletelyEmpty = !entry.blueprint ||
+        (!entry.blueprint.desiredOutcome &&
+         !entry.blueprint.targetAudience &&
+         !entry.blueprint.materialsInventory &&
+         !entry.blueprint.communicationPreferences &&
+         !entry.blueprint.voiceGuardrails?.tone &&
+         !entry.blueprint.voiceGuardrails?.structure &&
+         !entry.blueprint.voiceGuardrails?.content);
+
+      setBlueprintBypassed(false);
       await ensureSessionForProject(projectId);
       onNavigateToProject?.(projectId);
 
-      if (entry.project.status === "intake" || entry.blueprint?.status !== "committed") {
-        setPhase("blueprint");
-      } else {
-        setPhase("active");
-      }
+      // Only set blueprint phase if completely empty
+      setPhase(blueprintIsCompletelyEmpty ? "blueprint" : "active");
 
       await sendTextMessage(
-        `We’re working inside "${entry.project.title}". Acknowledge the selection and pull up the latest blueprint highlights.`,
+        blueprintIsCompletelyEmpty
+          ? `We're working inside "${entry.project.title}". The blueprint is empty, so let's set it up step by step before drafting.`
+          : `We're working inside "${entry.project.title}". You're in GHOSTWRITING MODE—focus on drafting and orchestration. When you queue draft updates, immediately continue talking with the user.`,
         { skipPersist: true },
       );
     },
-    [ensureSessionForProject, projectsList, sendTextMessage],
+    [ensureSessionForProject, projectsList, sendTextMessage, onNavigateToProject],
   );
 
   const autoAdvanceField = useCallback(
@@ -470,28 +691,61 @@ export function useProjectIntakeFlow({
 
   const isBlueprintComplete = useMemo(() => {
     if (!blueprint) return false;
-    return BLUEPRINT_FIELD_ORDER.every((key) =>
+    return REQUIRED_BLUEPRINT_FIELDS.every((key) =>
       blueprintFieldHasValue(blueprint, key),
     );
   }, [blueprint]);
 
+  const needsBlueprint = useMemo(() => {
+    if (!blueprint) return true;
+    if (!isBlueprintComplete) return true;
+    return false;
+  }, [blueprint, isBlueprintComplete]);
+
   useEffect(() => {
     if (!selectedProjectId) return;
     if (!activeProject) return;
-    const needsBlueprint =
-      !blueprint || blueprint.status !== "committed" || !isBlueprintComplete;
+
     setPhase((current) => {
-      if (needsBlueprint) {
-        return current === "blueprint" ? current : "blueprint";
+      // Don't override mode selection / project list phases
+      if (current === "mode-selection" || current === "awaiting-existing") {
+        return current;
       }
-      return current === "active" ? current : "active";
+
+      // Stay in blueprint ONLY if explicitly set and still empty
+      if (current === "blueprint") {
+        return current;
+      }
+
+      // Default to active (ghostwriting) for all project work
+      return "active";
     });
-  }, [activeProject, blueprint, isBlueprintComplete, selectedProjectId]);
+  }, [activeProject, selectedProjectId]);
+
+  useEffect(() => {
+    if (!needsBlueprint && blueprintBypassed) {
+      setBlueprintBypassed(false);
+    }
+  }, [blueprintBypassed, needsBlueprint]);
 
   const missingBlueprintFields = useMemo(
-    () => fieldStates.filter((field) => !field.isComplete),
+    () => fieldStates.filter((field) => !field.isComplete && !field.optional),
     [fieldStates],
   );
+
+  const summarizeMissingBlueprintFields = useCallback((): string | null => {
+    if (missingBlueprintFields.length === 0) return null;
+    if (missingBlueprintFields.length === 1) {
+      return missingBlueprintFields[0]?.label ?? null;
+    }
+    const labels = missingBlueprintFields.map((field) => field.label).filter(Boolean);
+    if (labels.length === 0) return null;
+    if (labels.length === 1) return labels[0] ?? null;
+    const tail = labels[labels.length - 1];
+    const head = labels.slice(0, -1).join(", ");
+    return head ? `${head}, and ${tail}` : tail;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [missingBlueprintFields]);
 
   const beginProjectSession = useCallback(async () => {
     const targetProjectId =
@@ -504,45 +758,134 @@ export function useProjectIntakeFlow({
 
     await ensureSessionForProject(targetProjectId);
 
-    const projectName = activeProject?.title ?? "this project";
+    let projectName = activeProject?.title ?? "this project";
+    let resolvedBlueprint = blueprint;
 
-    if (!blueprint || blueprint.status !== "committed" || !isBlueprintComplete) {
-      const fieldLabels = missingBlueprintFields.map((field) => field.label);
-      const fieldSummary = (() => {
-        if (fieldLabels.length === 0) return "the remaining blueprint fields";
-        if (fieldLabels.length === 1) return fieldLabels[0];
-        const tail = fieldLabels[fieldLabels.length - 1];
-        const head = fieldLabels.slice(0, -1).join(", ");
-        return `${head}, and ${tail}`;
-      })();
-      const needsProjectTitleConfirmation = !(
-        activeProject?.title && activeProject.title.trim().length > 0 &&
-        !activeProject.title.toLowerCase().startsWith("untitled")
-      );
-      const titleHint = needsProjectTitleConfirmation
-        ? " Also confirm whether they want to set or update the project name via update_project_metadata."
-        : "";
+    // SIMPLE LOGIC: Only enter blueprint if it's COMPLETELY empty
+    const blueprintIsCompletelyEmpty = !blueprint ||
+      (!blueprint.desiredOutcome &&
+       !blueprint.targetAudience &&
+       !blueprint.materialsInventory &&
+       !blueprint.communicationPreferences &&
+       !blueprint.voiceGuardrails?.tone &&
+       !blueprint.voiceGuardrails?.structure &&
+       !blueprint.voiceGuardrails?.content);
+
+    if (blueprintIsCompletelyEmpty) {
+      setPhase("blueprint");
+      setBlueprintBypassed(false);
+      const fieldSummary =
+        summarizeMissingBlueprintFields() ?? "the blueprint fields";
       await sendTextMessage(
-        `You are connected to project ${targetProjectId}. Open with a concise greeting that acknowledges "${projectName}" is already loaded. Explain that setup mode is available because the blueprint still needs ${fieldSummary}, then ask if the user wants to enter setup mode now. If they agree, walk through each missing item using sync_blueprint_field (repeat updates if they refine answers), keep list_projects off since the project is already assigned, and call update_project_metadata for the title when needed.${titleHint} If they prefer to skip, acknowledge it and continue in project editing mode without trying to fill the remaining setup items. Use get_project with id ${targetProjectId} if you need fresh details, but only after greeting them.`,
+        `You are connected to project ${targetProjectId}. The blueprint is completely empty, so enter blueprint mode. Walk the user through ${fieldSummary} with sync_blueprint_field and update_project_metadata, then call commit_blueprint when done.`,
         { skipPersist: true },
       );
       return;
     }
 
+    // Otherwise, ALWAYS ghostwriting mode
+    setPhase("active");
+    setBlueprintBypassed(false);
+
+    let snapshotMessage: string | null = null;
+    let shouldRequestSummary = false;
+    let autoSummaryText: string | null = null;
+
+    try {
+      const [projectBundle, initialWorkspace, todos] = await Promise.all([
+        convex.query(api.projects.getProject, {
+          projectId: targetProjectId as Id<"projects">,
+        }),
+        convex.query(api.documents.getWorkspace, {
+          projectId: targetProjectId as Id<"projects">,
+        }),
+        convex.query(api.todos.listForProject, {
+          projectId: targetProjectId as Id<"projects">,
+        }),
+      ]);
+
+      if (projectBundle?.project) {
+        projectName = projectBundle.project.title ?? projectName;
+      }
+      if (projectBundle?.blueprint) {
+        resolvedBlueprint = projectBundle.blueprint;
+      }
+
+      let workspace = initialWorkspace;
+      let workspaceSnapshot = workspace as DocumentWorkspaceSnapshot;
+      const draftText = workspaceSnapshot?.document?.latestDraftMarkdown ?? "";
+      const summaryText = workspaceSnapshot?.document?.summary ?? "";
+
+      const needsSummary = draftText.trim().length > 0 && summaryText.trim().length === 0;
+
+      if (needsSummary) {
+        try {
+          const summaryResult = await convex.action(
+            api.documents.generateDraftSummary,
+            { projectId: targetProjectId as Id<"projects"> },
+          );
+          if (summaryResult?.summary) {
+            autoSummaryText = summaryResult.summary;
+            const refreshedWorkspace = await convex.query(api.documents.getWorkspace, {
+              projectId: targetProjectId as Id<"projects">,
+            });
+            workspace = refreshedWorkspace;
+            workspaceSnapshot = refreshedWorkspace as DocumentWorkspaceSnapshot;
+          }
+        } catch (summaryError) {
+          console.error("[intake] failed to auto-generate summary", summaryError);
+        }
+      }
+
+      snapshotMessage = buildProjectSnapshotMessage({
+        projectName,
+        blueprint: resolvedBlueprint ?? null,
+        workspace: workspaceSnapshot,
+        todos,
+      });
+
+      const updatedDraftText = workspaceSnapshot?.document?.latestDraftMarkdown ?? "";
+      const updatedSummaryText = workspaceSnapshot?.document?.summary ?? "";
+      shouldRequestSummary =
+        updatedDraftText.trim().length > 0 && updatedSummaryText.trim().length === 0;
+
+    } catch (snapshotError) {
+      console.error("[intake] failed to build project snapshot", snapshotError);
+    }
+
     await sendTextMessage(
-      `You are connected to project ${targetProjectId}. Start with a quick greeting that mentions "${projectName}" is ready to work on. Do not call list_projects. If you need fresh context, call get_project with id ${targetProjectId} after greeting the user. Otherwise, ask how you can advance the next draft or deliverable right away.`,
+      `You are connected to project ${targetProjectId}. You are in GHOSTWRITING MODE. Greet the user, confirm "${projectName}" is loaded. NEVER call list_projects—stay focused on this single project. If you need to refresh context, call get_project with id ${targetProjectId}. CRITICAL: When you call queue_draft_update, IMMEDIATELY continue talking with the user—do not wait for TOOL_PROGRESS. The draft updates asynchronously in the background while you keep talking with the user.`,
       { skipPersist: true },
     );
+
+    if (snapshotMessage) {
+      await sendTextMessage(snapshotMessage, { skipPersist: true });
+    }
+
+    if (autoSummaryText) {
+      await sendTextMessage(
+        `A fresh summary of the current draft is available for quick reference:\n${autoSummaryText}`,
+        { skipPersist: true },
+      );
+    }
+
+    if (shouldRequestSummary) {
+      await sendTextMessage(
+        "The project already has Markdown but no saved summary. Offer to capture one if the user is ready; if they agree, queue a draft update that focuses on summarizing the current draft.",
+        { skipPersist: true },
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeProject,
     beginConversation,
     blueprint,
+    convex,
     ensureSessionForProject,
-    isBlueprintComplete,
-    missingBlueprintFields,
     sendTextMessage,
     selectedProjectId,
     sessionRecord?.projectId,
+    summarizeMissingBlueprintFields,
   ]);
 
   const commitBlueprint = useCallback(async () => {
@@ -554,7 +897,9 @@ export function useProjectIntakeFlow({
     setActiveProject(result.project);
     setBlueprint(result.blueprint);
     setPhase("active");
+    setBlueprintBypassed(false);
     manualFocusRef.current = false;
+    skipBlueprintTranscriptIdsRef.current.clear();
     await sendTextMessage(
       "Summarize the captured blueprint for confirmation and invite the user to continue into drafting.",
       { skipPersist: true },
@@ -564,6 +909,50 @@ export function useProjectIntakeFlow({
     selectedProjectId,
     sendTextMessage,
     sessionRecord,
+  ]);
+
+  const skipBlueprint = useCallback(async () => {
+    if (!needsBlueprint || blueprintBypassed) {
+      setPhase("active");
+      return;
+    }
+    const fieldSummary = summarizeMissingBlueprintFields();
+    const projectName = activeProject?.title ?? "this project";
+    setBlueprintBypassed(true);
+    setPhase("active");
+    skipBlueprintTranscriptIdsRef.current.clear();
+    await sendTextMessage(
+      `The user wants to skip blueprint work and start drafting ${projectName}. You are now in GHOSTWRITING MODE. Acknowledge open items${fieldSummary ? ` (${fieldSummary})` : ""}, capture TODOs, and focus on drafting. NEVER call list_projects—stay on this single project. When you call queue_draft_update, immediately continue talking with the user—don't wait.`,
+      { skipPersist: true },
+    );
+  }, [
+    activeProject?.title,
+    blueprintBypassed,
+    needsBlueprint,
+    sendTextMessage,
+    summarizeMissingBlueprintFields,
+  ]);
+
+  const resumeBlueprint = useCallback(async () => {
+    if (!needsBlueprint) return;
+    if (!blueprintBypassed) {
+      setPhase("blueprint");
+      return;
+    }
+    const fieldSummary =
+      summarizeMissingBlueprintFields() ?? "the remaining blueprint fields";
+    setBlueprintBypassed(false);
+    setPhase("blueprint");
+    skipBlueprintTranscriptIdsRef.current.clear();
+    await sendTextMessage(
+      `The user is ready to resume blueprint setup. Re-enter intake mode and work through ${fieldSummary} using sync_blueprint_field, update_project_metadata, and commit_blueprint when everything is captured.`,
+      { skipPersist: true },
+    );
+  }, [
+    blueprintBypassed,
+    needsBlueprint,
+    sendTextMessage,
+    summarizeMissingBlueprintFields,
   ]);
 
   useEffect(() => {
@@ -632,6 +1021,7 @@ export function useProjectIntakeFlow({
       });
       void openProject(match.project._id);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openProject, phase, projectsList, transcripts]);
 
   useEffect(() => {
@@ -673,14 +1063,74 @@ export function useProjectIntakeFlow({
   ]);
 
   useEffect(() => {
+    if (phase !== "blueprint") return;
+    if (!needsBlueprint || blueprintBypassed) return;
+    const latest = [...transcripts]
+      .filter((entry) => entry.speaker === "user")
+      .reverse()
+      .find((entry) => !skipBlueprintTranscriptIdsRef.current.has(entry.id));
+    if (!latest) return;
+    skipBlueprintTranscriptIdsRef.current.add(latest.id);
+    const normalized = latest.text.toLowerCase();
+    const mentionsSkip =
+      normalized.includes("skip") ||
+      normalized.includes("later") ||
+      normalized.includes("not now") ||
+      normalized.includes("don't worry");
+    const mentionsSetup =
+      normalized.includes("setup") ||
+      normalized.includes("set up") ||
+      normalized.includes("blueprint") ||
+      normalized.includes("intake") ||
+      normalized.includes("questions") ||
+      normalized.includes("details");
+    const wantsDraft =
+      normalized.includes("draft") ||
+      normalized.includes("write") ||
+      normalized.includes("writing") ||
+      normalized.includes("article") ||
+      normalized.includes("document") ||
+      normalized.includes("story");
+    const goKeywords =
+      normalized.includes("start") ||
+      normalized.includes("begin") ||
+      normalized.includes("jump") ||
+      normalized.includes("move on") ||
+      normalized.includes("just") ||
+      normalized.includes("straight") ||
+      normalized.includes("dive");
+    const skipIntent =
+      (mentionsSkip && (mentionsSetup || wantsDraft)) ||
+      (wantsDraft && goKeywords);
+    if (skipIntent) {
+      void skipBlueprint();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blueprintBypassed, needsBlueprint, phase, skipBlueprint, transcripts]);
+
+  useEffect(() => {
     if (status === "idle" || status === "ended") {
       setPhase("idle");
       setModeIntent(null);
       if (!initialProjectId) {
         setSelectedProjectId(null);
       }
+      setBlueprintBypassed(false);
+      skipBlueprintTranscriptIdsRef.current.clear();
     }
   }, [initialProjectId, status]);
+
+  const clearProject = useCallback(() => {
+    console.log("[intake] Clearing project state");
+    setSelectedProjectId(null);
+    setActiveProject(null);
+    setBlueprint(null);
+    setPhase("idle");
+    setModeIntent(null);
+    setBlueprintBypassed(false);
+    setActiveFieldKeyInternal(null);
+    setFieldActivity({});
+  }, []);
 
   return {
     phase,
@@ -697,11 +1147,15 @@ export function useProjectIntakeFlow({
     chooseExistingMode,
     startNewProject,
     openProject,
+    clearProject,
     setActiveFieldKey,
     updateField,
     updateVoiceGuardrails,
     updateProjectMetadata,
     isBlueprintComplete,
+    isBlueprintBypassed: blueprintBypassed,
     commitBlueprint,
+    skipBlueprint,
+    resumeBlueprint,
   };
 }

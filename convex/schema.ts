@@ -71,7 +71,9 @@ export default defineSchema({
     speaker: v.string(),
     transcript: v.string(),
     timestamp: v.number(),
-    tags: v.optional(v.array(v.string()))
+    tags: v.optional(v.array(v.string())),
+    role: v.optional(v.string()),
+    text: v.optional(v.string()),
   }).index("by_session", ["sessionId"]),
 
   notes: defineTable({
@@ -95,6 +97,7 @@ export default defineSchema({
   documents: defineTable({
     projectId: v.id("projects"),
     latestDraftMarkdown: v.optional(v.string()),
+    summary: v.optional(v.string()),
     status: v.string(),
     lockedSections: v.optional(v.array(v.string())),
     updatedAt: v.number()
@@ -107,6 +110,11 @@ export default defineSchema({
     content: v.string(),
     version: v.number(),
     locked: v.boolean(),
+    status: v.union(
+      v.literal("drafting"),
+      v.literal("needs_detail"),
+      v.literal("complete"),
+    ),
     updatedAt: v.number()
   }).index("by_document", ["documentId", "order"]),
 
@@ -115,6 +123,64 @@ export default defineSchema({
     label: v.string(),
     status: v.union(v.literal("open"), v.literal("in_review"), v.literal("resolved")),
     createdAt: v.number(),
-    resolvedAt: v.optional(v.number())
-  }).index("by_project", ["projectId"])
+    resolvedAt: v.optional(v.number()),
+    noteId: v.optional(v.id("notes"))
+  }).index("by_project", ["projectId"]),
+
+  draftJobs: defineTable({
+    projectId: v.id("projects"),
+    sessionId: v.id("sessions"),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("running"),
+      v.literal("complete"),
+      v.literal("error"),
+    ),
+    summary: v.optional(v.string()),
+    urgency: v.optional(v.string()),
+    messagePointers: v.optional(v.array(v.string())),
+    transcriptAnchors: v.optional(v.array(v.string())),
+    promptContext: v.optional(v.any()),
+    transcriptCursor: v.optional(v.number()),
+    generatedSummary: v.optional(v.string()),
+    modelUsage: v.optional(
+      v.object({
+        inputTokens: v.optional(v.number()),
+        outputTokens: v.optional(v.number()),
+        totalTokens: v.optional(v.number()),
+      }),
+    ),
+    createdAt: v.number(),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    updatedAt: v.number(),
+    error: v.optional(v.string()),
+    durationMs: v.optional(v.number()),
+    attemptCount: v.optional(v.number()),
+  })
+    .index("by_project", ["projectId", "createdAt"])
+    .index("by_status", ["status", "createdAt"]),
+
+  projectTranscripts: defineTable({
+    projectId: v.id("projects"),
+    sessionId: v.id("sessions"),
+    items: v.array(
+      v.object({
+        id: v.string(),
+        type: v.optional(v.string()),
+        role: v.optional(v.string()),
+        status: v.optional(v.string()),
+        previousItemId: v.optional(v.string()),
+        createdAt: v.number(),
+        messageId: v.optional(v.id("messages")),
+        messageKey: v.optional(v.string()),
+        text: v.optional(v.string()),
+        payload: v.optional(v.any()),
+      }),
+    ),
+    updatedAt: v.number(),
+    finalizedAt: v.optional(v.number()),
+  })
+    .index("by_project_session", ["projectId", "sessionId"])
+    .index("by_project", ["projectId", "updatedAt"]),
 });

@@ -59,11 +59,8 @@ export async function ensureProjectBlueprint(
     projectId,
     desiredOutcome: defaults?.desiredOutcome,
     targetAudience: defaults?.targetAudience,
-    publishingPlan: defaults?.publishingPlan,
-    timeline: defaults?.timeline,
     materialsInventory: defaults?.materialsInventory,
     communicationPreferences: defaults?.communicationPreferences,
-    budgetRange: defaults?.budgetRange,
     voiceGuardrails: defaults?.voiceGuardrails,
     status: defaults?.status ?? "draft",
     intakeSessionId: defaults?.intakeSessionId,
@@ -110,11 +107,8 @@ export async function ensureSandboxProject(
   await ensureProjectBlueprint(ctx, projectId, now, {
     desiredOutcome: "Explore realtime audio integration and diagnostics",
     targetAudience: "Developers running the local sandbox",
-    publishingPlan: "Internal testing only",
-    timeline: "During local development sessions",
     materialsInventory: "Sample prompts and transcripts",
     communicationPreferences: "Voice-first, optionally text overrides",
-    budgetRange: undefined,
     voiceGuardrails: {
       tone: "Friendly and technical",
       structure: "Step-by-step guidance",
