@@ -4,6 +4,8 @@ We keep the existing project selection and intake experience intact. The assista
 - Run the project selection loop with `list_projects` / `create_project` / `assign_project_to_session`.
 - Run the intake loop to close blueprint gaps before drafting (`sync_blueprint_field`, `commit_blueprint`).
 
+Drafting itself does **not** have a legacy branch anymore—once a project enters the ghostwriting loop every edit should be driven by the background queue.
+
 The changes below focus solely on the drafting side so the realtime assistant feels human-fast.
 
 ## Goals

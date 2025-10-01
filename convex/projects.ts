@@ -1,4 +1,4 @@
-import { mutation, query } from "./_generated/server";
+import { action, mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
@@ -9,15 +9,13 @@ import {
   ensureSandboxProject,
   loadLocalUser,
 } from "./utils";
+import { api } from "./_generated/api";
 
 const BLUEPRINT_FIELDS = [
   "desiredOutcome",
   "targetAudience",
-  "publishingPlan",
-  "timeline",
   "materialsInventory",
   "communicationPreferences",
-  "budgetRange",
 ] as const;
 
 type BlueprintField = (typeof BLUEPRINT_FIELDS)[number];
@@ -33,6 +31,19 @@ type BlueprintResponse = {
   blueprint: Doc<"projectBlueprints"> | null;
 };
 
+type TranscriptItem = {
+  id: string;
+  type?: string;
+  role?: string;
+  status?: string;
+  previousItemId?: string;
+  createdAt: number;
+  messageId?: Id<"messages">;
+  messageKey?: string;
+  text?: string;
+  payload?: unknown;
+};
+
 const sortProjects = (projects: Doc<"projects">[]) => {
   return [...projects].sort((a, b) => b.updatedAt - a.updatedAt);
 };
@@ -46,6 +57,154 @@ async function loadBlueprintForProject(
     .withIndex("by_project", (q) => q.eq("projectId", projectId))
     .unique();
 }
+
+async function loadTranscriptRecord(
+  ctx: { db: MutationCtx["db"] | QueryCtx["db"] },
+  projectId: Id<"projects">,
+  sessionId: Id<"sessions">,
+) {
+  return ctx.db
+    .query("projectTranscripts")
+    .withIndex("by_project_session", (q) =>
+      q.eq("projectId", projectId).eq("sessionId", sessionId),
+    )
+    .unique();
+}
+
+const mergeTranscriptItem = (
+  existing: TranscriptItem | undefined,
+  incoming: TranscriptItem,
+): TranscriptItem => {
+  if (!existing) return incoming;
+  const createdAt =
+    typeof existing.createdAt === "number"
+      ? Math.min(existing.createdAt, incoming.createdAt)
+      : incoming.createdAt;
+  return {
+    ...existing,
+    ...incoming,
+    createdAt,
+    messageId: incoming.messageId ?? existing.messageId,
+    messageKey: incoming.messageKey ?? existing.messageKey ?? existing.id,
+    text: incoming.text ?? existing.text,
+    payload:
+      typeof incoming.payload !== "undefined"
+        ? incoming.payload
+        : existing.payload,
+  };
+};
+
+const extractTranscriptText = (value: unknown): string | null => {
+  if (!value) return null;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((entry) => extractTranscriptText(entry))
+      .filter((entry): entry is string => Boolean(entry));
+    return parts.join(" ") || null;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") return record.text;
+    if (typeof record.transcript === "string") return record.transcript;
+    if (typeof record.value === "string") return record.value;
+    if ("content" in record) {
+      return extractTranscriptText(record.content);
+    }
+  }
+  return null;
+};
+
+const sanitizeTranscriptPayload = (value: unknown): unknown => {
+  if (
+    value === null ||
+    typeof value === "undefined" ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => sanitizeTranscriptPayload(entry))
+      .filter((entry) => typeof entry !== "undefined");
+  }
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    const typed = new Uint8Array(
+      view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength),
+    );
+    return Array.from(typed);
+  }
+  if (value instanceof ArrayBuffer) {
+    return undefined;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const sanitized: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(record)) {
+      const normalized = sanitizeTranscriptPayload(inner);
+      if (typeof normalized !== "undefined") {
+        sanitized[key] = normalized;
+      }
+    }
+    return sanitized;
+  }
+  return undefined;
+};
+
+const orderTranscriptItems = (items: TranscriptItem[]): TranscriptItem[] => {
+  if (items.length <= 1) return [...items];
+
+  const byId = new Map<string, TranscriptItem>();
+  const nextByPrevious = new Map<string, TranscriptItem>();
+
+  for (const item of items) {
+    byId.set(item.id, item);
+    if (item.previousItemId) {
+      nextByPrevious.set(item.previousItemId, item);
+    }
+  }
+
+  const visited = new Set<string>();
+  const ordered: TranscriptItem[] = [];
+
+  const pushChain = (start: TranscriptItem | undefined) => {
+    let current = start;
+    while (current && !visited.has(current.id)) {
+      ordered.push(current);
+      visited.add(current.id);
+      current = nextByPrevious.get(current.id);
+    }
+  };
+
+  const startingNode = items.find(
+    (item) => !item.previousItemId || !byId.has(item.previousItemId),
+  );
+
+  if (startingNode) {
+    pushChain(startingNode);
+  }
+
+  for (const item of items) {
+    if (!visited.has(item.id)) {
+      pushChain(item);
+    }
+  }
+
+  if (ordered.length === items.length) {
+    return ordered;
+  }
+
+  const fallback = [...ordered];
+  for (const item of items) {
+    if (!visited.has(item.id)) {
+      fallback.push(item);
+    }
+  }
+  return fallback;
+};
 
 export const listProjects = query({
   args: {
@@ -170,11 +329,8 @@ export const syncBlueprintField = mutation({
     field: v.union(
       v.literal("desiredOutcome"),
       v.literal("targetAudience"),
-      v.literal("publishingPlan"),
-      v.literal("timeline"),
       v.literal("materialsInventory"),
       v.literal("communicationPreferences"),
-      v.literal("budgetRange"),
       v.literal("voiceGuardrails"),
     ),
     value: v.union(v.string(), VOICE_GUARDRAILS, v.null()),
@@ -227,26 +383,87 @@ export const recordTranscriptPointer = mutation({
   args: {
     projectId: v.id("projects"),
     sessionId: v.id("sessions"),
-    messageId: v.union(v.id("messages"), v.string()),
+    itemId: v.optional(v.string()),
+    messageId: v.optional(v.union(v.id("messages"), v.string())),
   },
   handler: async (ctx, args): Promise<Doc<"projectBlueprints">> => {
     const now = Date.now();
     const blueprint = await ensureProjectBlueprint(ctx, args.projectId, now);
 
-    const normalizedMessageId =
-      typeof args.messageId === "string"
-        ? ctx.db.normalizeId("messages", args.messageId)
-        : args.messageId;
+    const normalizeMessageId = (value: unknown) => {
+      if (typeof value === "string") {
+        return ctx.db.normalizeId("messages", value) ?? null;
+      }
+      return value ?? null;
+    };
 
-    if (!normalizedMessageId) {
-      throw new Error("Unable to resolve messageId for transcript pointer");
+    let resolvedMessageId = normalizeMessageId(args.messageId);
+
+    const pointer = args.itemId?.trim();
+    if (!resolvedMessageId && pointer) {
+      const transcriptRecord = await loadTranscriptRecord(
+        ctx,
+        args.projectId,
+        args.sessionId,
+      );
+      const candidates = new Set<string>([pointer]);
+      if (transcriptRecord) {
+        const match = transcriptRecord.items.find(
+          (item) => item.id === pointer || item.messageKey === pointer,
+        );
+        if (match?.messageId) {
+          resolvedMessageId = match.messageId;
+        }
+        if (match?.messageKey) {
+          candidates.add(match.messageKey);
+        }
+      }
+
+      if (!resolvedMessageId) {
+        for (const candidate of candidates) {
+          const normalized = ctx.db.normalizeId("messages", candidate);
+          if (normalized) {
+            resolvedMessageId = normalized;
+            break;
+          }
+        }
+      }
+
+      if (!resolvedMessageId) {
+        const messages = await ctx.db
+          .query("messages")
+          .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+          .collect();
+
+        for (const message of messages) {
+          if (message.tags?.some((tag) => candidates.has(tag))) {
+            resolvedMessageId = message._id;
+            break;
+          }
+        }
+      }
     }
 
-    await ctx.db.patch(blueprint._id, {
-      intakeSessionId: args.sessionId,
-      intakeTranscriptMessageId: normalizedMessageId,
-      updatedAt: now,
-    });
+    // Only update the blueprint anchor if we successfully resolved a message ID
+    // This prevents errors when the AI calls record_transcript_pointer with
+    // transcript IDs that haven't been persisted to messages yet
+    if (resolvedMessageId) {
+      const messageId = resolvedMessageId as Id<"messages">;
+
+      await ctx.db.patch(blueprint._id, {
+        intakeSessionId: args.sessionId,
+        intakeTranscriptMessageId: messageId,
+        updatedAt: now,
+      });
+    } else {
+      // Normal case: transcript ID hasn't been persisted yet (async)
+      // Still update the session association; pointer will be linkable later
+      await ctx.db.patch(blueprint._id, {
+        intakeSessionId: args.sessionId,
+        updatedAt: now,
+      });
+      // Note: Client-side tool handler logs this if needed
+    }
 
     const updated = await ctx.db.get(blueprint._id);
     if (!updated) {
@@ -295,5 +512,248 @@ export const commitBlueprint = mutation({
     }
 
     return { project: refreshedProject, blueprint: refreshedBlueprint };
+  },
+});
+
+export const saveTranscriptChunk = mutation({
+  args: {
+    projectId: v.id("projects"),
+    sessionId: v.id("sessions"),
+    item: v.object({
+      id: v.string(),
+      type: v.optional(v.string()),
+      role: v.optional(v.string()),
+      status: v.optional(v.string()),
+      previousItemId: v.optional(v.string()),
+      createdAt: v.optional(v.number()),
+      messageId: v.optional(v.id("messages")),
+      messageKey: v.optional(v.string()),
+      payload: v.optional(v.any()),
+      text: v.optional(v.string()),
+    }),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const existing = await loadTranscriptRecord(
+      ctx,
+      args.projectId,
+      args.sessionId,
+    );
+
+    const payloadText = extractTranscriptText(args.item.payload);
+    const directText = extractTranscriptText(args.item);
+    const incomingText = payloadText ?? directText ?? null;
+    const sanitizedPayload = sanitizeTranscriptPayload(args.item.payload);
+
+    const incoming: TranscriptItem = {
+      id: args.item.id,
+      type: args.item.type ?? undefined,
+      role: args.item.role ?? undefined,
+      status: args.item.status ?? undefined,
+      previousItemId: args.item.previousItemId ?? undefined,
+      createdAt: args.item.createdAt ?? now,
+      messageId: args.item.messageId ?? undefined,
+      messageKey: args.item.messageKey ?? undefined,
+      text:
+        typeof args.item.text === "string" && args.item.text.trim()
+          ? args.item.text.trim()
+          : incomingText ?? undefined,
+      payload: sanitizedPayload,
+    };
+
+    if (!existing) {
+      const transcriptId = await ctx.db.insert("projectTranscripts", {
+        projectId: args.projectId,
+        sessionId: args.sessionId,
+        items: orderTranscriptItems([incoming]),
+        updatedAt: now,
+        finalizedAt: undefined,
+      });
+      const inserted = await ctx.db.get(transcriptId);
+      return inserted ?? null;
+    }
+
+    const mergedItems = Array.isArray(existing.items)
+      ? [...(existing.items as TranscriptItem[])]
+      : ([] as TranscriptItem[]);
+    const index = mergedItems.findIndex((item) => item.id === incoming.id);
+    if (index >= 0) {
+      mergedItems[index] = mergeTranscriptItem(
+        mergedItems[index] as TranscriptItem,
+        incoming,
+      );
+    } else {
+      mergedItems.push(incoming);
+    }
+
+    const ordered = orderTranscriptItems(
+      mergedItems as TranscriptItem[],
+    ) as TranscriptItem[];
+
+    await ctx.db.patch(existing._id, {
+      items: ordered,
+      updatedAt: now,
+    });
+
+    return { ...existing, items: ordered, updatedAt: now };
+  },
+});
+
+export const finalizeTranscript = mutation({
+  args: {
+    projectId: v.id("projects"),
+    sessionId: v.id("sessions"),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const existing = await loadTranscriptRecord(
+      ctx,
+      args.projectId,
+      args.sessionId,
+    );
+
+    if (!existing) {
+      const transcriptId = await ctx.db.insert("projectTranscripts", {
+        projectId: args.projectId,
+        sessionId: args.sessionId,
+        items: [],
+        updatedAt: now,
+        finalizedAt: now,
+      });
+      return ctx.db.get(transcriptId);
+    }
+
+    const ordered = orderTranscriptItems(existing.items as TranscriptItem[]);
+    await ctx.db.patch(existing._id, {
+      items: ordered,
+      updatedAt: now,
+      finalizedAt: now,
+    });
+
+    return { ...existing, items: ordered, updatedAt: now, finalizedAt: now };
+  },
+});
+
+export const getTranscriptForProject = query({
+  args: {
+    projectId: v.id("projects"),
+  },
+  handler: async (ctx, args) => {
+    const records = await ctx.db
+      .query("projectTranscripts")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .collect();
+
+    if (records.length === 0) {
+      return [] as const;
+    }
+
+    const sorted = [...records].sort((a, b) => b.updatedAt - a.updatedAt);
+    return sorted.map((record) => ({
+      ...record,
+      items: orderTranscriptItems(record.items as TranscriptItem[]),
+    }));
+  },
+});
+
+export const verifyTranscriptIntegrity = action({
+  args: {
+    projectId: v.optional(v.id("projects")),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const projectsToCheck: Doc<"projects">[] = [];
+
+    if (args.projectId) {
+      const single = await ctx.runQuery(api.projects.getProject, {
+        projectId: args.projectId,
+      });
+      if (single?.project) {
+        projectsToCheck.push(single.project);
+      }
+    } else {
+      const limit = Math.max(1, args.limit ?? 25);
+      const listed = await ctx.runQuery(api.projects.listProjects, {
+        limit,
+      });
+      for (const entry of listed) {
+        projectsToCheck.push(entry.project);
+      }
+    }
+
+    const anomalies: Array<{
+      projectId: Id<"projects">;
+      sessionId: Id<"sessions">;
+      issues: string[];
+    }> = [];
+    let checkedRecords = 0;
+
+    for (const project of projectsToCheck) {
+      const transcripts = await ctx.runQuery(
+        api.projects.getTranscriptForProject,
+        { projectId: project._id },
+      );
+
+      for (const record of transcripts) {
+        checkedRecords += 1;
+        const issues: string[] = [];
+        const items = Array.isArray(record.items)
+          ? (record.items as TranscriptItem[])
+          : [];
+        const seenIds = new Set<string>();
+        const idToItem = new Map<string, TranscriptItem>();
+        let lastTimestamp = -Infinity;
+
+        for (const item of items as TranscriptItem[]) {
+          const id = typeof item.id === "string" && item.id.trim() ? item.id : "";
+          if (!id) {
+            issues.push("missing item id");
+            continue;
+          }
+          if (seenIds.has(id)) {
+            issues.push(`duplicate item id ${id}`);
+          }
+          seenIds.add(id);
+          idToItem.set(id, item);
+
+          if (typeof item.createdAt === "number") {
+            if (item.createdAt < lastTimestamp) {
+              issues.push(`createdAt regression at ${id}`);
+            }
+            lastTimestamp = item.createdAt;
+          }
+        }
+
+        for (const item of items as TranscriptItem[]) {
+          if (
+            item.previousItemId &&
+            !seenIds.has(item.previousItemId) &&
+            !idToItem.has(item.previousItemId)
+          ) {
+            issues.push(
+              `missing previousItemId ${item.previousItemId} referenced by ${item.id}`,
+            );
+          }
+        }
+
+        if (issues.length > 0) {
+          anomalies.push({
+            projectId: project._id,
+            sessionId: record.sessionId,
+            issues,
+          });
+        }
+      }
+    }
+
+    if (anomalies.length > 0) {
+      console.warn("[transcripts] integrity anomalies detected", anomalies);
+    } else {
+      console.log("[transcripts] integrity check passed", {
+        checkedRecords,
+      });
+    }
+
+    return { checked: checkedRecords, anomalies } as const;
   },
 });

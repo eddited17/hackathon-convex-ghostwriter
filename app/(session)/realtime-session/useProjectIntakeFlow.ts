@@ -8,6 +8,7 @@ import type { Doc, Id } from "@/convex/_generated/dataModel";
 import {
   BLUEPRINT_FIELD_DEFINITIONS,
   BLUEPRINT_FIELD_ORDER,
+  REQUIRED_BLUEPRINT_FIELDS,
   blueprintFieldHasValue,
   normalizeTextValue,
   type BlueprintFieldDefinition,
@@ -97,16 +98,6 @@ const formatBlueprintSnapshot = (
         lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
         break;
       }
-      case "publishingPlan": {
-        const value = normalizeTextValue(blueprint.publishingPlan);
-        lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
-        break;
-      }
-      case "timeline": {
-        const value = normalizeTextValue(blueprint.timeline);
-        lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
-        break;
-      }
       case "materialsInventory": {
         const value = normalizeTextValue(blueprint.materialsInventory);
         lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
@@ -114,11 +105,6 @@ const formatBlueprintSnapshot = (
       }
       case "communicationPreferences": {
         const value = normalizeTextValue(blueprint.communicationPreferences);
-        lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
-        break;
-      }
-      case "budgetRange": {
-        const value = normalizeTextValue(blueprint.budgetRange);
         lines.push(`- ${definition.label}: ${value || MISSING_VALUE_LABEL}`);
         break;
       }
@@ -325,7 +311,6 @@ interface UseProjectIntakeFlowOptions {
   sessionRecord: RealtimeSessionState["sessionRecord"];
   assignProjectToSession: RealtimeSessionState["assignProjectToSession"];
   resolveMessageId: RealtimeSessionState["resolveMessageId"];
-  ingestProjects: RealtimeSessionState["ingestProjects"];
   onNavigateToProject?: (projectId: Id<"projects">) => void;
   initialProjectId?: Id<"projects"> | null;
 }
@@ -351,6 +336,7 @@ export interface ProjectIntakeState {
   chooseExistingMode: () => Promise<void>;
   startNewProject: () => Promise<void>;
   openProject: (projectId: Id<"projects">) => Promise<void>;
+  clearProject: () => void;
   setActiveFieldKey: (key: BlueprintFieldKey | null, manual?: boolean) => void;
   updateField: (key: BlueprintFieldKey, value: string) => Promise<void>;
   updateVoiceGuardrails: (value: VoiceGuardrails) => Promise<void>;
@@ -374,7 +360,6 @@ export function useProjectIntakeFlow({
   sessionRecord,
   assignProjectToSession,
   resolveMessageId,
-  ingestProjects,
   onNavigateToProject,
   initialProjectId,
 }: UseProjectIntakeFlowOptions): ProjectIntakeState {
@@ -462,6 +447,7 @@ export function useProjectIntakeFlow({
     existingTranscriptIdsRef.current.clear();
     fieldTranscriptIdsRef.current.clear();
     navigateToProjectRef.current?.(projectIdFromSession);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionRecord?.projectId]);
 
   const projectsList = useMemo<ProjectListEntry[]>(
@@ -469,10 +455,8 @@ export function useProjectIntakeFlow({
     [projects],
   );
 
-  useEffect(() => {
-    if (!projectsList.length) return;
-    ingestProjects(projectsList);
-  }, [ingestProjects, projectsList]);
+  // REMOVED: Automatic ingestProjects calls that were polluting the conversation
+  // The assistant will explicitly call list_projects/get_project ONLY when needed
 
   const isProjectContextHydrated = useMemo(() => {
     if (!selectedProjectId) return true;
@@ -568,22 +552,32 @@ export function useProjectIntakeFlow({
       manualFocusRef.current = false;
       fieldTranscriptIdsRef.current.clear();
       skipBlueprintTranscriptIdsRef.current.clear();
+
+      // SIMPLE LOGIC: Only enter blueprint if it's COMPLETELY empty
+      const blueprintIsCompletelyEmpty = !entry.blueprint ||
+        (!entry.blueprint.desiredOutcome &&
+         !entry.blueprint.targetAudience &&
+         !entry.blueprint.materialsInventory &&
+         !entry.blueprint.communicationPreferences &&
+         !entry.blueprint.voiceGuardrails?.tone &&
+         !entry.blueprint.voiceGuardrails?.structure &&
+         !entry.blueprint.voiceGuardrails?.content);
+
       setBlueprintBypassed(false);
       await ensureSessionForProject(projectId);
       onNavigateToProject?.(projectId);
 
-      if (entry.project.status === "intake" || entry.blueprint?.status !== "committed") {
-        setPhase("blueprint");
-      } else {
-        setPhase("active");
-      }
+      // Only set blueprint phase if completely empty
+      setPhase(blueprintIsCompletelyEmpty ? "blueprint" : "active");
 
       await sendTextMessage(
-        `We’re working inside "${entry.project.title}". Acknowledge the selection and pull up the latest blueprint highlights.`,
+        blueprintIsCompletelyEmpty
+          ? `We're working inside "${entry.project.title}". The blueprint is empty, so let's set it up step by step before drafting.`
+          : `We're working inside "${entry.project.title}". You're in GHOSTWRITING MODE—focus on drafting and orchestration. When you queue draft updates, immediately continue talking with the user.`,
         { skipPersist: true },
       );
     },
-    [ensureSessionForProject, projectsList, sendTextMessage],
+    [ensureSessionForProject, projectsList, sendTextMessage, onNavigateToProject],
   );
 
   const autoAdvanceField = useCallback(
@@ -701,32 +695,36 @@ export function useProjectIntakeFlow({
 
   const isBlueprintComplete = useMemo(() => {
     if (!blueprint) return false;
-    return BLUEPRINT_FIELD_ORDER.every((key) =>
+    return REQUIRED_BLUEPRINT_FIELDS.every((key) =>
       blueprintFieldHasValue(blueprint, key),
     );
   }, [blueprint]);
 
   const needsBlueprint = useMemo(() => {
     if (!blueprint) return true;
-    if (blueprint.status !== "committed") return true;
-    return !isBlueprintComplete;
+    if (!isBlueprintComplete) return true;
+    return false;
   }, [blueprint, isBlueprintComplete]);
 
   useEffect(() => {
     if (!selectedProjectId) return;
     if (!activeProject) return;
+
     setPhase((current) => {
-      if (needsBlueprint && !blueprintBypassed) {
-        return current === "blueprint" ? current : "blueprint";
+      // Don't override mode selection / project list phases
+      if (current === "mode-selection" || current === "awaiting-existing") {
+        return current;
       }
-      return current === "active" ? current : "active";
+
+      // Stay in blueprint ONLY if explicitly set and still empty
+      if (current === "blueprint") {
+        return current;
+      }
+
+      // Default to active (ghostwriting) for all project work
+      return "active";
     });
-  }, [
-    activeProject,
-    blueprintBypassed,
-    needsBlueprint,
-    selectedProjectId,
-  ]);
+  }, [activeProject, selectedProjectId]);
 
   useEffect(() => {
     if (!needsBlueprint && blueprintBypassed) {
@@ -735,7 +733,12 @@ export function useProjectIntakeFlow({
   }, [blueprintBypassed, needsBlueprint]);
 
   const missingBlueprintFields = useMemo(
-    () => fieldStates.filter((field) => !field.isComplete),
+    () => fieldStates.filter((field) => !field.isComplete && !field.optional),
+    [fieldStates],
+  );
+
+  const blueprintHasAnyCapturedValue = useMemo(
+    () => fieldStates.some((field) => field.isComplete),
     [fieldStates],
   );
 
@@ -750,6 +753,7 @@ export function useProjectIntakeFlow({
     const tail = labels[labels.length - 1];
     const head = labels.slice(0, -1).join(", ");
     return head ? `${head}, and ${tail}` : tail;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [missingBlueprintFields]);
 
   const beginProjectSession = useCallback(async () => {
@@ -766,34 +770,38 @@ export function useProjectIntakeFlow({
     let projectName = activeProject?.title ?? "this project";
     let resolvedBlueprint = blueprint;
 
-    if (needsBlueprint) {
+    // SIMPLE LOGIC: Only enter blueprint if it's COMPLETELY empty
+    const blueprintIsCompletelyEmpty = !blueprint ||
+      (!blueprint.desiredOutcome &&
+       !blueprint.targetAudience &&
+       !blueprint.materialsInventory &&
+       !blueprint.communicationPreferences &&
+       !blueprint.voiceGuardrails?.tone &&
+       !blueprint.voiceGuardrails?.structure &&
+       !blueprint.voiceGuardrails?.content);
+
+    if (blueprintIsCompletelyEmpty) {
+      setPhase("blueprint");
+      setBlueprintBypassed(false);
       const fieldSummary =
-        summarizeMissingBlueprintFields() ?? "the remaining blueprint fields";
-      const needsProjectTitleConfirmation = !(
-        activeProject?.title && activeProject.title.trim().length > 0 &&
-        !activeProject.title.toLowerCase().startsWith("untitled")
+        summarizeMissingBlueprintFields() ?? "the blueprint fields";
+      await sendTextMessage(
+        `You are connected to project ${targetProjectId}. The blueprint is completely empty, so enter blueprint mode. Walk the user through ${fieldSummary} with sync_blueprint_field and update_project_metadata, then call commit_blueprint when done.`,
+        { skipPersist: true },
       );
-      const titleHint = needsProjectTitleConfirmation
-        ? " Also confirm whether they want to set or update the project name via update_project_metadata."
-        : "";
-      if (blueprintBypassed) {
-        await sendTextMessage(
-          `You are connected to project ${targetProjectId}. The user chose to skip the remaining setup (${fieldSummary}) for now. Acknowledge the open items, keep a TODO list for anything still missing, and move straight into drafting using apply_document_edits and related tools. Do not call list_projects. If context feels stale, refresh with get_project ${targetProjectId}.`,
-          { skipPersist: true },
-        );
-      } else {
-        await sendTextMessage(
-          `You are connected to project ${targetProjectId}. Open with a concise greeting that acknowledges "${projectName}" is already loaded. Explain that setup mode is available because the blueprint still needs ${fieldSummary}, then ask if the user wants to enter setup mode now. If they agree, walk through each missing item using sync_blueprint_field (repeat updates if they refine answers), keep list_projects off since the project is already assigned, and call update_project_metadata for the title when needed.${titleHint} If they prefer to skip, acknowledge it and continue in project editing mode without trying to fill the remaining setup items. Use get_project with id ${targetProjectId} if you need fresh details, but only after greeting the user.`,
-          { skipPersist: true },
-        );
-      }
       return;
     }
 
+    // Otherwise, ALWAYS ghostwriting mode
+    setPhase("active");
+    setBlueprintBypassed(false);
+
     let snapshotMessage: string | null = null;
     let shouldRequestSummary = false;
+    let autoSummaryText: string | null = null;
+
     try {
-      const [projectBundle, workspace, todos] = await Promise.all([
+      const [projectBundle, initialWorkspace, todos] = await Promise.all([
         convex.query(api.projects.getProject, {
           projectId: targetProjectId as Id<"projects">,
         }),
@@ -812,22 +820,50 @@ export function useProjectIntakeFlow({
         resolvedBlueprint = projectBundle.blueprint;
       }
 
+      let workspace = initialWorkspace;
+      let workspaceSnapshot = workspace as DocumentWorkspaceSnapshot;
+      const draftText = workspaceSnapshot?.document?.latestDraftMarkdown ?? "";
+      const summaryText = workspaceSnapshot?.document?.summary ?? "";
+
+      const needsSummary = draftText.trim().length > 0 && summaryText.trim().length === 0;
+
+      if (needsSummary) {
+        try {
+          const summaryResult = await convex.action(
+            api.documents.generateDraftSummary,
+            { projectId: targetProjectId as Id<"projects"> },
+          );
+          if (summaryResult?.summary) {
+            autoSummaryText = summaryResult.summary;
+            const refreshedWorkspace = await convex.query(api.documents.getWorkspace, {
+              projectId: targetProjectId as Id<"projects">,
+            });
+            workspace = refreshedWorkspace;
+            workspaceSnapshot = refreshedWorkspace as DocumentWorkspaceSnapshot;
+          }
+        } catch (summaryError) {
+          console.error("[intake] failed to auto-generate summary", summaryError);
+        }
+      }
+
       snapshotMessage = buildProjectSnapshotMessage({
         projectName,
         blueprint: resolvedBlueprint ?? null,
-        workspace: workspace as DocumentWorkspaceSnapshot,
+        workspace: workspaceSnapshot,
         todos,
       });
 
-      const draftText = workspace?.document?.latestDraftMarkdown ?? "";
-      const summaryText = workspace?.document?.summary ?? "";
-      shouldRequestSummary = draftText.trim().length > 0 && summaryText.trim().length === 0;
+      const updatedDraftText = workspaceSnapshot?.document?.latestDraftMarkdown ?? "";
+      const updatedSummaryText = workspaceSnapshot?.document?.summary ?? "";
+      shouldRequestSummary =
+        updatedDraftText.trim().length > 0 && updatedSummaryText.trim().length === 0;
+
     } catch (snapshotError) {
       console.error("[intake] failed to build project snapshot", snapshotError);
     }
 
     await sendTextMessage(
-      `You are connected to project ${targetProjectId}. Open with a quick greeting that confirms "${projectName}" is loaded, then move straight into shaping the draft. Default to running apply_document_edits so progress keeps flowing without waiting for the user to say "start writing." Do not call list_projects. If context feels stale, call get_project with id ${targetProjectId} after the greeting, and narrate updates once TOOL_PROGRESS::<json> confirms them.`,
+      `You are connected to project ${targetProjectId}. You are in GHOSTWRITING MODE. Greet the user, confirm "${projectName}" is loaded. NEVER call list_projects—stay focused on this single project. If you need to refresh context, call get_project with id ${targetProjectId}. CRITICAL: When you call queue_draft_update, IMMEDIATELY continue talking with the user—do not wait for TOOL_PROGRESS. The draft updates asynchronously in the background while you keep talking with the user.`,
       { skipPersist: true },
     );
 
@@ -835,20 +871,26 @@ export function useProjectIntakeFlow({
       await sendTextMessage(snapshotMessage, { skipPersist: true });
     }
 
-    if (shouldRequestSummary) {
+    if (autoSummaryText) {
       await sendTextMessage(
-        "The project already has Markdown but no saved summary. Produce a concise high-signal summary now by calling apply_document_edits with the summary field set (leave Markdown untouched unless you need to fix formatting).",
+        `A fresh summary of the current draft is available for quick reference:\n${autoSummaryText}`,
         { skipPersist: true },
       );
     }
+
+    if (shouldRequestSummary) {
+      await sendTextMessage(
+        "The project already has Markdown but no saved summary. Offer to capture one if the user is ready; if they agree, queue a draft update that focuses on summarizing the current draft.",
+        { skipPersist: true },
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeProject,
     beginConversation,
     blueprint,
-    blueprintBypassed,
     convex,
     ensureSessionForProject,
-    needsBlueprint,
     sendTextMessage,
     selectedProjectId,
     sessionRecord?.projectId,
@@ -889,7 +931,7 @@ export function useProjectIntakeFlow({
     setPhase("active");
     skipBlueprintTranscriptIdsRef.current.clear();
     await sendTextMessage(
-      `The user wants to skip the remaining blueprint work for now and jump into drafting ${projectName}. Acknowledge the open items${fieldSummary ? ` (${fieldSummary})` : ""}, capture TODO notes so nothing is lost, and move forward with ghostwriting using apply_document_edits, create_note, and related tools. Default to writing immediately - keep apply_document_edits running asynchronously, react to TOOL_PROGRESS::<json> updates, and avoid list_projects while this project stays active.`,
+      `The user wants to skip blueprint work and start drafting ${projectName}. You are now in GHOSTWRITING MODE. Acknowledge open items${fieldSummary ? ` (${fieldSummary})` : ""}, capture TODOs, and focus on drafting. NEVER call list_projects—stay on this single project. When you call queue_draft_update, immediately continue talking with the user—don't wait.`,
       { skipPersist: true },
     );
   }, [
@@ -1085,6 +1127,18 @@ export function useProjectIntakeFlow({
     }
   }, [initialProjectId, status]);
 
+  const clearProject = useCallback(() => {
+    console.log("[intake] Clearing project state");
+    setSelectedProjectId(null);
+    setActiveProject(null);
+    setBlueprint(null);
+    setPhase("idle");
+    setModeIntent(null);
+    setBlueprintBypassed(false);
+    setActiveFieldKeyInternal(null);
+    setFieldActivity({});
+  }, []);
+
   return {
     phase,
     modeIntent,
@@ -1100,6 +1154,7 @@ export function useProjectIntakeFlow({
     chooseExistingMode,
     startNewProject,
     openProject,
+    clearProject,
     setActiveFieldKey,
     updateField,
     updateVoiceGuardrails,

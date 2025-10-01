@@ -1,6 +1,10 @@
 "use client";
 
-import type { NoiseReductionProfile } from "@/lib/realtimeAudio";
+import type {
+  NoiseReductionProfile,
+  TurnDetectionOption,
+  TurnDetectionPreset,
+} from "@/lib/realtimeAudio";
 
 export type DeviceSelectProps = {
   label: string;
@@ -113,6 +117,42 @@ export function NoiseReductionToggle({
           <input
             type="radio"
             name="noise-profile"
+            value={option.value}
+            checked={option.value === value}
+            onChange={() => onChange(option.value)}
+            disabled={disabled}
+          />
+          <div>
+            <span className="noise-label">{option.label}</span>
+            <span className="noise-description">{option.description}</span>
+          </div>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+export type TurnDetectionToggleProps = {
+  value: TurnDetectionPreset;
+  options: TurnDetectionOption[];
+  onChange: (preset: TurnDetectionPreset) => void;
+  disabled?: boolean;
+};
+
+export function TurnDetectionToggle({
+  value,
+  options,
+  onChange,
+  disabled,
+}: TurnDetectionToggleProps) {
+  return (
+    <fieldset className="noise-toggle" disabled={disabled}>
+      <legend>Turn detection</legend>
+      {options.map((option) => (
+        <label key={option.value} className="noise-option">
+          <input
+            type="radio"
+            name="turn-detection"
             value={option.value}
             checked={option.value === value}
             onChange={() => onChange(option.value)}

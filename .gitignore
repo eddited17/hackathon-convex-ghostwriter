@@ -32,3 +32,4 @@ convex/_generated/
 !convex/_generated/dataModel.ts
 !convex/_generated/server.ts
 convex/dist/
+.vercel

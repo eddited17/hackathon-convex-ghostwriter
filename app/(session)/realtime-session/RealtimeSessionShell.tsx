@@ -16,7 +16,7 @@ import {
 } from "./useRealtimeSession";
 import { useProjectIntakeFlow } from "./useProjectIntakeFlow";
 import { useRealtimeSessionContext } from "./RealtimeSessionProvider";
-import DocumentWorkspace from "./DocumentWorkspace";
+import DynamicDocumentView from "./DynamicDocumentView";
 import SessionControlBar from "./SessionControlBar";
 
 const formatTime = (timestamp: number) =>
@@ -34,56 +34,6 @@ const formatDate = (timestamp: number) =>
     minute: "2-digit",
   }).format(timestamp);
 
-type TranscriptListProps = {
-  transcripts: RealtimeSessionState["transcripts"];
-  partialUserTranscript: string | null;
-  partialAssistantTranscript: string | null;
-};
-
-function TranscriptList({ transcripts, partialAssistantTranscript, partialUserTranscript }: TranscriptListProps) {
-  return (
-    <ol className="transcript-list">
-      {transcripts.length === 0 && !partialAssistantTranscript && !partialUserTranscript ? (
-        <li className="placeholder">Start speaking to populate the transcript.</li>
-      ) : null}
-      {transcripts.map((entry) => (
-        <li key={entry.id} className={`transcript transcript-${entry.speaker}`}>
-          <div className="transcript-meta">
-            <span className="speaker">{entry.speaker === "user" ? "You" : "Assistant"}</span>
-            <time dateTime={new Date(entry.timestamp).toISOString()}>
-              {formatTime(entry.timestamp)}
-            </time>
-          </div>
-          <p>{entry.text}</p>
-        </li>
-      ))}
-      {partialUserTranscript ? (
-        <li className="transcript transcript-user transcript-partial">
-          <div className="transcript-meta">
-            <span className="speaker">You</span>
-            <span className="partial-indicator">capturing…</span>
-          </div>
-          <p>{partialUserTranscript}</p>
-        </li>
-      ) : null}
-      {partialAssistantTranscript ? (
-        <li className="transcript transcript-assistant transcript-partial">
-          <div className="transcript-meta">
-            <span className="speaker">Assistant</span>
-            <span className="partial-indicator">responding…</span>
-          </div>
-          <p>{partialAssistantTranscript}</p>
-        </li>
-      ) : null}
-    </ol>
-  );
-}
-
-type DiagnosticsProps = {
-  connectionLog: RealtimeSessionState["connectionLog"];
-  serverEvents: RealtimeSessionState["serverEvents"];
-};
-
 type DraftSnapshot = {
   wordCount: number;
   todoCount: number;
@@ -92,47 +42,6 @@ type DraftSnapshot = {
     status: "drafting" | "needs_detail" | "complete";
   }>;
 };
-
-function Diagnostics({ connectionLog, serverEvents }: DiagnosticsProps) {
-  const recentServerEvents = serverEvents.slice(-12).reverse();
-  return (
-    <div className="diagnostics">
-      <section>
-        <h3>Connection log</h3>
-        <ul>
-          {connectionLog.length === 0 ? (
-            <li className="placeholder">No connection activity yet.</li>
-          ) : (
-            connectionLog
-              .slice(-12)
-              .reverse()
-              .map((event) => (
-                <li key={event.id}>
-                  <span className="time">{formatTime(event.timestamp)}</span>
-                  <span>{event.message}</span>
-                </li>
-              ))
-          )}
-        </ul>
-      </section>
-      <section>
-        <h3>Realtime events</h3>
-        <ul>
-          {recentServerEvents.length === 0 ? (
-            <li className="placeholder">Events will appear after the session starts.</li>
-          ) : (
-            recentServerEvents.map((event) => (
-              <li key={event.id}>
-                <span className="time">{formatTime(event.timestamp)}</span>
-                <span>{event.type}</span>
-              </li>
-            ))
-          )}
-        </ul>
-      </section>
-    </div>
-  );
-}
 
 export default function RealtimeSessionShell({
   projectTitle,
@@ -146,21 +55,17 @@ export default function RealtimeSessionShell({
   const router = useRouter();
   const {
     status,
-    isConnected,
     startSession,
     stopSession,
     transcripts,
-    partialUserTranscript,
-    partialAssistantTranscript,
-    connectionLog,
-    serverEvents,
+    draftProgress,
     error,
     sendTextMessage,
     registerAudioElement,
     sessionRecord,
     assignProjectToSession,
     resolveMessageId,
-    ingestProjects,
+    instructionContext,
     updateInstructionContext,
   } = useRealtimeSessionContext();
 
@@ -190,7 +95,6 @@ export default function RealtimeSessionShell({
     sessionRecord,
     assignProjectToSession,
     resolveMessageId,
-    ingestProjects,
     onNavigateToProject: (targetProjectId) => {
       if (projectId && targetProjectId === projectId) return;
       router.push(`/projects/${targetProjectId}`);
@@ -211,7 +115,7 @@ export default function RealtimeSessionShell({
   const [goalDraft, setGoalDraft] = useState("");
   const [contentTypeDraft, setContentTypeDraft] = useState<ContentType>("article");
   const [activeTab, setActiveTab] = useState<"document" | "settings">("document");
-  const [draftSnapshot, setDraftSnapshot] = useState<DraftSnapshot | null>(null);
+  const [draftSnapshot] = useState<DraftSnapshot | null>(null);
 
   useEffect(() => {
     const next: Partial<Record<BlueprintFieldKey, string>> = {};
@@ -256,36 +160,65 @@ export default function RealtimeSessionShell({
   ]);
 
   useEffect(() => {
-    if (phase === "active") {
+    // SIMPLE MODE LOGIC:
+    // - No project selected → INTAKE
+    // - Project selected + blueprint completely empty → BLUEPRINT
+    // - Everything else → GHOSTWRITING
+
+    const hasProject = Boolean(activeProject?._id);
+    const blueprintIsCompletelyEmpty = !blueprint ||
+      (!blueprint.desiredOutcome &&
+       !blueprint.targetAudience &&
+       !blueprint.materialsInventory &&
+       !blueprint.communicationPreferences &&
+       !blueprint.voiceGuardrails?.tone &&
+       !blueprint.voiceGuardrails?.structure &&
+       !blueprint.voiceGuardrails?.content);
+
+    if (!hasProject) {
+      // INTAKE MODE: Project list selection
+      console.log("[session] Mode → INTAKE (no project selected)");
       updateInstructionContext({
-        mode: "ghostwriting",
+        mode: "intake",
         blueprintSummary: undefined,
-        draftingSnapshot: draftSnapshot
-          ? {
-              todoCount: draftSnapshot.todoCount,
-              sections: draftSnapshot.sections,
-            }
-          : undefined,
+        draftingSnapshot: undefined,
+        latestDraftUpdate: undefined,
       });
       return;
     }
-    if (phase === "blueprint") {
+
+    if (blueprintIsCompletelyEmpty && phase === "blueprint") {
+      // BLUEPRINT MODE: Only when blueprint is completely empty AND we're explicitly in blueprint phase
       const missingFields = fieldStates
         .filter((field) => !field.isComplete)
         .map((field) => field.key);
+      console.log("[session] Mode → BLUEPRINT (empty blueprint)", { missingFields });
       updateInstructionContext({
         mode: "blueprint",
         blueprintSummary: { missingFields },
         draftingSnapshot: undefined,
+        latestDraftUpdate: undefined,
       });
       return;
     }
-    updateInstructionContext({
-      mode: "intake",
-      blueprintSummary: undefined,
-      draftingSnapshot: undefined,
+
+    // GHOSTWRITING MODE: Default when working on a project
+    console.log("[session] Mode → GHOSTWRITING", {
+      hasProject,
+      blueprintEmpty: blueprintIsCompletelyEmpty,
+      phase
     });
-  }, [draftSnapshot, fieldStates, phase, updateInstructionContext]);
+    updateInstructionContext({
+      mode: "ghostwriting",
+      blueprintSummary: undefined,
+      draftingSnapshot: draftSnapshot
+        ? {
+            todoCount: draftSnapshot.todoCount,
+            sections: draftSnapshot.sections,
+          }
+        : undefined,
+    });
+  }, [activeProject, blueprint, draftSnapshot, fieldStates, phase, updateInstructionContext]);
 
   const audioRef = useCallback(
     (element: HTMLAudioElement | null) => {
@@ -295,44 +228,10 @@ export default function RealtimeSessionShell({
   );
 
   const selectedProjectId = activeProject?._id ?? sessionRecord?.projectId ?? null;
-  const hasExplicitProjectContext = Boolean(projectId ?? selectedProjectId);
-
-  const handleBeginConversation = useCallback(() => {
-    if (hasExplicitProjectContext) {
-      if (!isProjectContextHydrated) {
-        console.warn("Project context still loading; delaying session start.");
-        return;
-      }
-      void beginProjectSession();
-      return;
-    }
-    void beginConversation();
-  }, [
-    beginConversation,
-    beginProjectSession,
-    isProjectContextHydrated,
-    hasExplicitProjectContext,
-  ]);
-
-  const handleStop = useCallback(() => {
-    void stopSession("Session ended by user");
-  }, [stopSession]);
-
-  const handleManualSubmit = useCallback(
-    (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      if (!manualMessage.trim()) return;
-      void sendTextMessage(manualMessage).then(() => setManualMessage(""));
-    },
-    [manualMessage, sendTextMessage],
-  );
 
   const blueprintProgress = fieldStates.filter((field) => field.isComplete).length;
   const blueprintTotal = fieldStates.length;
   const blueprintStatus = blueprint?.status ?? "draft";
-  const sessionStartedAtLabel = sessionRecord?.startedAt
-    ? formatDate(sessionRecord.startedAt)
-    : null;
 
   const handleFieldDraftChange = useCallback(
     (key: BlueprintFieldKey, value: string) => {
@@ -402,26 +301,6 @@ export default function RealtimeSessionShell({
       <header className="shell-toolbar">
         {breadcrumbs}
         <h2>{projectTitle}</h2>
-
-        <div className="toolbar-actions">
-          {isConnected ? (
-            <button className="danger" onClick={handleStop}>
-              End session
-            </button>
-          ) : (
-            <button
-              className="primary"
-              onClick={handleBeginConversation}
-              disabled={
-                status === "connecting" ||
-                status === "requesting-permissions" ||
-                (hasExplicitProjectContext && !isProjectContextHydrated)
-              }
-            >
-              Start conversation
-            </button>
-          )}
-        </div>
       </header>
 
       {!isProjectContextHydrated && hasExplicitProjectContext ? (
@@ -462,15 +341,15 @@ export default function RealtimeSessionShell({
                   </p>
                 </div>
               ) : null}
-              <DocumentWorkspace
+              <DynamicDocumentView
                 projectId={selectedProjectId}
-                blueprint={blueprint}
-                fieldStates={fieldStates}
-                onSnapshot={setDraftSnapshot}
+                realtimeStatus={draftProgress}
+                mode={instructionContext.mode}
+                autoScroll={true}
               />
             </>
           ) : (
-            <>
+            <div className="settings-container">
               <section className="panel project-panel">
                 <div className="panel-header">
                   <h2>Project overview</h2>
@@ -663,37 +542,7 @@ export default function RealtimeSessionShell({
                   </button>
                 ) : null}
               </section>
-              <section className="panel transcripts-panel">
-                <div className="panel-header">
-                  <h2>Conversation transcript</h2>
-                  {sessionStartedAtLabel ? (
-                    <span className="panel-subtitle">Started {sessionStartedAtLabel}</span>
-                  ) : null}
-                </div>
-                <TranscriptList
-                  transcripts={transcripts}
-                  partialAssistantTranscript={partialAssistantTranscript}
-                  partialUserTranscript={partialUserTranscript}
-                />
-                <form className="manual-entry" onSubmit={handleManualSubmit}>
-                  <label>
-                    Manual text reply
-                    <textarea
-                      value={manualMessage}
-                      onChange={(event) => setManualMessage(event.target.value)}
-                      placeholder="Type a quick response when you can’t speak"
-                      disabled={!isConnected}
-                    />
-                  </label>
-                  <button type="submit" disabled={!isConnected || !manualMessage.trim()}>
-                    Send to assistant
-                  </button>
-                </form>
-                <div className="diagnostics-inline">
-                  <Diagnostics connectionLog={connectionLog} serverEvents={serverEvents} />
-                </div>
-              </section>
-            </>
+            </div>
           )}
         </div>
         <SessionControlBar />

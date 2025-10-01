@@ -32,11 +32,8 @@ export const CONTENT_TYPE_OPTIONS: Array<{
 export type BlueprintFieldKey =
   | "desiredOutcome"
   | "targetAudience"
-  | "publishingPlan"
-  | "timeline"
   | "materialsInventory"
   | "communicationPreferences"
-  | "budgetRange"
   | "voiceGuardrails";
 
 export type BlueprintFieldType = "text" | "longform" | "voice";
@@ -48,6 +45,7 @@ export interface BlueprintFieldDefinition {
   prompt: string;
   placeholder: string;
   type: BlueprintFieldType;
+  optional?: boolean;
 }
 
 export const BLUEPRINT_FIELD_DEFINITIONS: BlueprintFieldDefinition[] = [
@@ -70,24 +68,6 @@ export const BLUEPRINT_FIELD_DEFINITIONS: BlueprintFieldDefinition[] = [
     type: "longform",
   },
   {
-    key: "publishingPlan",
-    label: "Publishing plan",
-    helper: "Where will this appear and what format is expected?",
-    prompt:
-      "Note the primary channel (blog, LinkedIn, keynote) and any formatting expectations or cadence goals.",
-    placeholder: "e.g., LinkedIn series over 4 weeks, cross-posted to company blog",
-    type: "longform",
-  },
-  {
-    key: "timeline",
-    label: "Timeline",
-    helper: "Key milestones, launch date, review moments.",
-    prompt:
-      "Summarize deadlines, launch windows, or checkpoints the assistant should plan around.",
-    placeholder: "e.g., First draft by Oct 18, final approval Nov 2",
-    type: "text",
-  },
-  {
     key: "materialsInventory",
     label: "Materials inventory",
     helper: "What research, notes, or interviews already exist?",
@@ -106,15 +86,6 @@ export const BLUEPRINT_FIELD_DEFINITIONS: BlueprintFieldDefinition[] = [
     type: "longform",
   },
   {
-    key: "budgetRange",
-    label: "Budget range",
-    helper: "Optional. Guardrails for external spend or ads.",
-    prompt:
-      "If relevant, note any spend ceilings or resource constraints tied to this project.",
-    placeholder: "e.g., Up to $5k for external fact-checking and design polish",
-    type: "text",
-  },
-  {
     key: "voiceGuardrails",
     label: "Voice guardrails",
     helper: "Tone, structure, and content boundaries to keep the writing aligned.",
@@ -128,6 +99,16 @@ export const BLUEPRINT_FIELD_DEFINITIONS: BlueprintFieldDefinition[] = [
 export const BLUEPRINT_FIELD_ORDER: BlueprintFieldKey[] = BLUEPRINT_FIELD_DEFINITIONS.map(
   (definition) => definition.key,
 );
+
+export const REQUIRED_BLUEPRINT_FIELDS: BlueprintFieldKey[] =
+  BLUEPRINT_FIELD_DEFINITIONS.filter((definition) => !definition.optional).map(
+    (definition) => definition.key,
+  );
+
+export const OPTIONAL_BLUEPRINT_FIELDS: BlueprintFieldKey[] =
+  BLUEPRINT_FIELD_DEFINITIONS.filter((definition) => definition.optional).map(
+    (definition) => definition.key,
+  );
 
 export interface VoiceGuardrails {
   tone?: string;

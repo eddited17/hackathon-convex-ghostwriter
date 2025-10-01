@@ -75,7 +75,7 @@ Once a project enters drafting (either because the blueprint is committed or you
 
 - **Document tab:** shows the live Markdown draft, section outline, blueprint highlights, and outstanding TODOs. Edits streamed back from Convex update immediately thanks to the ghostwriting toolset.
 - **Session settings tab:** houses transcripts, diagnostics, device controls, and manual reply. Switching tabs never interrupts the live draft view.
-- **Realtime drafting:** the assistant receives the entire document and can trigger `apply_document_edits`, `create_note`, `update_todo_status`, `record_transcript_pointer`, and more. Tool access is controlled centrally via `lib/realtimeTools.ts` so the server and client stay in sync as session mode changes.
+- **Realtime drafting:** the assistant receives the entire document and can queue background updates (`queue_draft_update`), capture notes (`create_note`), update TODOs, anchor transcripts, and more. Tool access is controlled centrally via `lib/realtimeTools.ts` so the server and client stay in sync as session mode changes.
 - **Transcript anchoring:** every OpenAI transcript fragment (`user-*` / `assistant-*` / `item_*`) is mapped back to the persisted Convex message id. Notes, blueprint syncs, and TODO updates now attach to the correct transcript pointer without validation errors.
 - **Memory loop:** facts, stories, style cues, and TODOs are captured as structured Convex notes with optional transcript anchors. The document sidebar surfaces open items so nothing gets lost while drafting.
 

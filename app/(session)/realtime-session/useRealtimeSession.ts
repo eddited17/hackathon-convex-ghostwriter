@@ -5,12 +5,17 @@ import { useConvex, useMutation } from "convex/react";
 
 import {
   AudioLevelMonitor,
+  DEFAULT_TURN_DETECTION_PRESET,
   NOISE_REDUCTION_OPTIONS,
   NoiseReductionProfile,
   TranscriptionFragment,
+  TURN_DETECTION_OPTIONS,
+  TurnDetectionConfig,
+  TurnDetectionPreset,
   VoiceActivityState,
   applySinkId,
   createPeerConnection,
+  getTurnDetectionConfig,
 } from "@/lib/realtimeAudio";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
@@ -26,6 +31,10 @@ import {
   type SessionInstructionOptions,
 } from "@/lib/realtimeInstructions";
 import { getToolsForMode } from "@/lib/realtimeTools";
+import {
+  REQUIRED_BLUEPRINT_FIELDS,
+  blueprintFieldHasValue,
+} from "@/lib/projects";
 
 const randomId = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -113,17 +122,23 @@ export interface RealtimeSessionState {
   selectOutputDevice: (deviceId: string) => Promise<void>;
   noiseReduction: NoiseReductionProfile;
   setNoiseReduction: (profile: NoiseReductionProfile) => void;
+  turnDetection: TurnDetectionConfig;
+  turnDetectionPreset: TurnDetectionPreset;
+  setTurnDetectionPreset: (preset: TurnDetectionPreset) => void;
   language: string;
   setLanguage: (language: string) => Promise<void>;
   languageOptions: LanguageOption[];
   microphoneLevel: number;
   assistantLevel: number;
   voiceActivity: VoiceActivityState;
+  isMuted: boolean;
+  toggleMute: () => void;
   transcripts: TranscriptionFragment[];
   partialUserTranscript: string | null;
   partialAssistantTranscript: string | null;
   connectionLog: ConnectionEvent[];
   serverEvents: ServerEventLog[];
+  draftProgress: DraftProgressState;
   error: string | null;
   sendTextMessage: (message: string, options?: ManualMessageOptions) => Promise<void>;
   registerAudioElement: (element: HTMLAudioElement | null) => void;
@@ -188,17 +203,45 @@ type InstructionContext = {
   mode: SessionInstructionMode;
   blueprintSummary?: SessionInstructionOptions["blueprintSummary"];
   draftingSnapshot?: SessionInstructionOptions["draftingSnapshot"];
+  latestDraftUpdate?: {
+    status: Exclude<DraftProgressStateStatus, "idle">;
+    summary: string | null;
+    updatedAt: number;
+  } | null;
+};
+
+type DraftProgressStateStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "complete"
+  | "error";
+
+type DraftProgressState = {
+  status: DraftProgressStateStatus;
+  jobId: string | null;
+  summary: string | null;
+  error: string | null;
+  updatedAt: number | null;
 };
 
 type NoteTypeValue = "fact" | "story" | "style" | "voice" | "todo" | "summary";
 type TodoStatusValue = "open" | "in_review" | "resolved";
 type DocumentSectionStatus = "drafting" | "needs_detail" | "complete";
 
-const BLOCKED_TOOLS_IN_GHOSTWRITING = new Set([
+const normalizeToolName = (value: string): string =>
+  value
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[\s-]+/g, "_")
+    .toLowerCase();
+
+const TOOLS_ALLOWING_EMPTY_ARGS = new Set([
   "list_projects",
-  "create_project",
-  "assign_project_to_session",
-]);
+  "queue_draft_update",
+  "get_project",
+  "get_document_workspace",
+].map(normalizeToolName));
 
 const parseToolCallArguments = (
   value: unknown,
@@ -279,7 +322,13 @@ const collectToolCallInvocationsFromValue = (
       }
 
       const args = parseToolCallArguments(argsSource);
-      collected.push({ id, name, arguments: args, responseId });
+      collected.push({
+        id,
+        name,
+        arguments: args,
+        responseId,
+        rawArguments: argsSource,
+      });
     }
 
     if (Array.isArray(reference.tool_calls)) {
@@ -414,6 +463,50 @@ const coerceOptionalString = (
     return safeJsonStringify(value);
   }
   return undefined;
+};
+
+const coerceStringArray = (value: unknown): string[] | null => {
+  if (typeof value === "undefined" || value === null) return null;
+  if (Array.isArray(value)) {
+    const entries = value
+      .map((entry) => coerceOptionalString(entry))
+      .filter((entry): entry is string => typeof entry === "string");
+    return entries.length > 0 ? entries : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        const entries = parsed
+          .map((entry) => coerceOptionalString(entry))
+          .filter((entry): entry is string => typeof entry === "string");
+        return entries.length > 0 ? entries : null;
+      }
+    } catch (error) {
+      // ignore JSON parse error; treat as raw string
+    }
+    return [trimmed];
+  }
+  return null;
+};
+
+const coercePromptContext = (value: unknown): unknown => {
+  if (typeof value === "undefined" || value === null) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    try {
+      return JSON.parse(trimmed);
+    } catch (error) {
+      return trimmed;
+    }
+  }
+  if (typeof value === "object") {
+    return value;
+  }
+  return value;
 };
 
 const coerceIdString = (value: unknown): string | null => {
@@ -600,49 +693,13 @@ const summarizeBlueprint = (blueprint: BlueprintDoc | null | undefined) => {
   if (!blueprint) {
     return {
       status: "missing",
-      missingFields: [
-        "desiredOutcome",
-        "targetAudience",
-        "publishingPlan",
-        "timeline",
-        "materialsInventory",
-        "communicationPreferences",
-        "budgetRange",
-        "voiceGuardrails",
-      ],
+      missingFields: [...REQUIRED_BLUEPRINT_FIELDS],
     };
   }
 
-  const missingFields: string[] = [];
-  const textFields: Array<keyof BlueprintDoc> = [
-    "desiredOutcome",
-    "targetAudience",
-    "publishingPlan",
-    "timeline",
-    "materialsInventory",
-    "communicationPreferences",
-    "budgetRange",
-  ];
-
-  for (const field of textFields) {
-    const value = blueprint[field];
-    if (typeof value !== "string" || value.trim().length === 0) {
-      missingFields.push(field);
-    }
-  }
-
-  const guardrails = blueprint.voiceGuardrails;
-  if (
-    !guardrails ||
-    Object.values(guardrails).every((entry) => {
-      if (typeof entry === "string") {
-        return entry.trim().length === 0;
-      }
-      return !entry;
-    })
-  ) {
-    missingFields.push("voiceGuardrails");
-  }
+  const missingFields = REQUIRED_BLUEPRINT_FIELDS.filter(
+    (field) => !blueprintFieldHasValue(blueprint, field),
+  );
 
   return {
     status: blueprint.status ?? "draft",
@@ -726,6 +783,12 @@ export function useRealtimeSession(): RealtimeSessionState {
     useState<string>();
   const [noiseReduction, setNoiseReduction] =
     useState<NoiseReductionProfile>("near_field");
+  const [turnDetectionPreset, setTurnDetectionPreset] =
+    useState<TurnDetectionPreset>(DEFAULT_TURN_DETECTION_PRESET);
+  const turnDetection = useMemo(
+    () => getTurnDetectionConfig(turnDetectionPreset),
+    [turnDetectionPreset],
+  );
   const [language, setLanguageState] = useState<string>(
     DEFAULT_LANGUAGE_OPTION.value,
   );
@@ -735,6 +798,7 @@ export function useRealtimeSession(): RealtimeSessionState {
     user: false,
     assistant: false,
   });
+  const [isMuted, setIsMuted] = useState(false);
   const [transcripts, setTranscripts] = useState<TranscriptionFragment[]>([]);
   const [partialUserTranscript, setPartialUserTranscript] =
     useState<string | null>(null);
@@ -742,6 +806,13 @@ export function useRealtimeSession(): RealtimeSessionState {
     useState<string | null>(null);
   const [connectionLog, setConnectionLog] = useState<ConnectionEvent[]>([]);
   const [serverEvents, setServerEvents] = useState<ServerEventLog[]>([]);
+  const [draftProgress, setDraftProgress] = useState<DraftProgressState>({
+    status: "idle",
+    jobId: null,
+    summary: null,
+    error: null,
+    updatedAt: null,
+  });
   const [sessionRecord, setSessionRecord] =
     useState<SessionBootstrap | null>(null);
   const [instructionContext, setInstructionContextState] =
@@ -760,11 +831,13 @@ export function useRealtimeSession(): RealtimeSessionState {
   const persistedMessageIdsRef = useRef<Set<string>>(new Set());
   const transcriptMessageIdsRef = useRef<Map<string, Id<"messages">>>(new Map());
   const handledToolCallIdsRef = useRef<Set<string>>(new Set());
+  const lastProgressEventRef = useRef<string | null>(null);
   const completeOnceRef = useRef(false);
   const lastInstructionRef = useRef<string | null>(null);
   const lastToolSignatureRef = useRef<string | null>(null);
   const lastProjectResultsRef = useRef<ProjectToolResult[]>([]);
   const sessionIdRef = useRef<Id<"sessions"> | null>(null);
+  const projectIdRef = useRef<Id<"projects"> | null>(null);
 
   const registerMessagePointer = useCallback(
     (pointer: string | null | undefined, messageId: Id<"messages">) => {
@@ -804,7 +877,15 @@ export function useRealtimeSession(): RealtimeSessionState {
 
   const resetInstructionContext = useCallback(() => {
     setInstructionContextState({ mode: "intake" });
-  }, []);
+    setDraftProgress({
+      status: "idle",
+      jobId: null,
+      summary: null,
+      error: null,
+      updatedAt: null,
+    });
+    lastProgressEventRef.current = null;
+  }, [setDraftProgress]);
 
   const createSessionMutation = useMutation(api.sessions.createSession);
   const updateRealtimeMutation = useMutation(
@@ -833,6 +914,15 @@ export function useRealtimeSession(): RealtimeSessionState {
   const createNoteMutation = useMutation(api.notes.createNote);
   const updateTodoStatusMutation = useMutation(api.todos.updateStatus);
   const applyDocumentEditsMutation = useMutation(api.documents.applyEdits);
+  const enqueueDraftUpdateMutation = useMutation(
+    api.documents.enqueueDraftUpdate,
+  );
+  const saveTranscriptChunkMutation = useMutation(
+    api.projects.saveTranscriptChunk,
+  );
+  const finalizeProjectTranscriptMutation = useMutation(
+    api.projects.finalizeTranscript,
+  );
 
 const resolveProjectId = useCallback(
   (args?: ToolCallArguments): string => {
@@ -894,11 +984,10 @@ const resolveProjectId = useCallback(
         }
       }
 
-      if (sessionRecord?.projectId) {
-        console.log("[realtime] resolveProjectId falling back to session project", {
-          projectId: sessionRecord.projectId,
-        });
-        return sessionRecord.projectId;
+      const fallbackProjectId = sessionRecord?.projectId ?? projectIdRef.current;
+      if (fallbackProjectId) {
+        // Normal case: use active session project (no logging needed)
+        return fallbackProjectId;
       }
 
       if (lastProjectResultsRef.current.length > 0) {
@@ -974,11 +1063,17 @@ const resolveProjectId = useCallback(
       setOutputDevices(outputs);
 
       if (!selectedInputDeviceId && inputs.length > 0) {
-        setSelectedInputDeviceId(inputs[0]!.deviceId);
+        const defaultInput = inputs.find(
+          (d) => d.deviceId === "default" || d.label.toLowerCase().includes("default")
+        ) || inputs[0]!;
+        setSelectedInputDeviceId(defaultInput.deviceId);
       }
 
       if (!selectedOutputDeviceId && outputs.length > 0) {
-        setSelectedOutputDeviceId(outputs[0]!.deviceId);
+        const defaultOutput = outputs.find(
+          (d) => d.deviceId === "default" || d.label.toLowerCase().includes("default")
+        ) || outputs[0]!;
+        setSelectedOutputDeviceId(defaultOutput.deviceId);
       }
     } catch (deviceError) {
       console.error("Failed to enumerate devices", deviceError);
@@ -1005,6 +1100,14 @@ const resolveProjectId = useCallback(
       speaker: "user" | "assistant",
       key: string,
       rawText: string | null | undefined,
+      options?: {
+        itemId?: string | null;
+        itemType?: string | null;
+        itemStatus?: string | null;
+        previousItemId?: string | null;
+        payload?: unknown;
+        createdAt?: number;
+      },
     ) => {
       const text = sanitizeTranscript(rawText);
       if (!text || persistedMessageIdsRef.current.has(key)) {
@@ -1034,17 +1137,25 @@ const resolveProjectId = useCallback(
         setVoiceActivity((current) => ({ ...current, assistant: false }));
       }
 
-      if (sessionRecord?.sessionId) {
+      let savedMessageId: Id<"messages"> | null = null;
+      const conversationPayload = options?.payload;
+      const conversationText = sanitizeTranscript(
+        extractText(conversationPayload) ?? rawText,
+      );
+      const sessionIdValue = sessionRecord?.sessionId ?? sessionIdRef.current;
+      if (sessionIdValue) {
         try {
           const persisted = await appendMessageMutation({
-            sessionId: sessionRecord.sessionId,
+            sessionId: sessionIdValue,
             speaker,
             transcript: text,
             timestamp: message.timestamp,
             eventId: key,
+            itemId: options?.itemId ?? key,
+            role: options?.itemType ?? speaker,
+            text: conversationText || text,
           });
           if (persisted?.messageId) {
-            console.log("[realtime] persisted messageId", persisted.messageId);
             registerMessagePointer(key, persisted.messageId);
             const hyphenIndex = key.indexOf("-");
             if (hyphenIndex !== -1 && hyphenIndex < key.length - 1) {
@@ -1054,13 +1165,49 @@ const resolveProjectId = useCallback(
               );
             }
             registerMessagePointer(persisted.messageId, persisted.messageId);
+            savedMessageId = persisted.messageId;
           }
         } catch (persistError) {
           console.error("Failed to persist transcript", persistError);
         }
       }
+
+      const projectIdValue = sessionRecord?.projectId ?? projectIdRef.current;
+      if (
+        projectIdValue &&
+        sessionIdValue &&
+        (options?.itemId || options?.payload)
+      ) {
+        try {
+          await saveTranscriptChunkMutation({
+            projectId: projectIdValue,
+            sessionId: sessionIdValue,
+            item: {
+              id: options?.itemId ?? key,
+              type: options?.itemType ?? undefined,
+              status: options?.itemStatus ?? undefined,
+              role: speaker,
+              previousItemId: options?.previousItemId ?? undefined,
+              payload: conversationPayload,
+              createdAt: options?.createdAt ?? message.timestamp,
+              messageId: savedMessageId ?? undefined,
+              messageKey: key,
+              text: conversationText || text || undefined,
+            },
+          });
+        } catch (chunkError) {
+          console.error("Failed to persist transcript chunk", chunkError, {
+            itemId: options?.itemId ?? key,
+          });
+        }
+      }
     },
-    [appendMessageMutation, registerMessagePointer, sessionRecord],
+    [
+      appendMessageMutation,
+      registerMessagePointer,
+      saveTranscriptChunkMutation,
+      sessionRecord,
+    ],
   );
 
   const resolveMessagePointer = useCallback(
@@ -1088,13 +1235,8 @@ const resolveProjectId = useCallback(
         }
       }
 
-      const lowered = trimmed.toLowerCase();
-      const looksLikeConvexId =
-        lowered === trimmed && /^[a-z0-9]{10,}$/.test(lowered);
-      if (looksLikeConvexId) {
-        return trimmed as Id<"messages">;
-      }
-
+      // CRITICAL: Only return IDs we've explicitly mapped
+      // Do NOT guess - transcript IDs look like Convex IDs but aren't valid
       return null;
     },
     [],
@@ -1117,6 +1259,7 @@ const resolveProjectId = useCallback(
     resetMonitors();
     resetFragments();
     setVoiceActivity({ user: false, assistant: false });
+    setIsMuted(false);
   }, [resetFragments, resetMonitors]);
 
 
@@ -1137,12 +1280,34 @@ const resolveProjectId = useCallback(
           console.error("Failed to mark session complete", completionError);
         }
       }
+      const sessionIdValue = sessionRecord?.sessionId ?? sessionIdRef.current;
+      const projectIdValue = sessionRecord?.projectId ?? projectIdRef.current;
+      if (projectIdValue && sessionIdValue) {
+        try {
+          await finalizeProjectTranscriptMutation({
+            projectId: projectIdValue,
+            sessionId: sessionIdValue,
+          });
+        } catch (finalizeError) {
+          console.error(
+            "Failed to finalize project transcript",
+            finalizeError,
+          );
+        }
+      }
       setSessionRecord(null);
+      projectIdRef.current = null;
       lastInstructionRef.current = null;
       lastToolSignatureRef.current = null;
       setStatus("ended");
     },
-    [completeSessionMutation, sessionRecord, status, tearDownConnection],
+    [
+      completeSessionMutation,
+      finalizeProjectTranscriptMutation,
+      sessionRecord,
+      status,
+      tearDownConnection,
+    ],
   );
 
   const stopSessionRef = useRef(stopSession);
@@ -1201,6 +1366,27 @@ const resolveProjectId = useCallback(
     [logConnection],
   );
 
+  const toggleMute = useCallback(() => {
+    const stream = localStreamRef.current;
+    if (!stream) {
+      console.warn("[realtime] Cannot toggle mute: no active stream");
+      return;
+    }
+
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      console.warn("[realtime] Cannot toggle mute: no audio tracks");
+      return;
+    }
+
+    const nextMuted = !isMuted;
+    audioTracks.forEach((track) => {
+      track.enabled = !nextMuted;
+    });
+    setIsMuted(nextMuted);
+    logConnection(nextMuted ? "Microphone muted" : "Microphone unmuted");
+  }, [isMuted, logConnection]);
+
   const assignProjectToSession = useCallback(
     async (projectId: Id<"projects">) => {
       const sessionId = sessionRecord?.sessionId ?? sessionIdRef.current;
@@ -1220,6 +1406,7 @@ const resolveProjectId = useCallback(
           sessionId,
           projectId,
         });
+        projectIdRef.current = projectId;
         setSessionRecord((previous) =>
           previous
             ? {
@@ -1235,12 +1422,31 @@ const resolveProjectId = useCallback(
         );
         sessionIdRef.current = sessionId;
         console.log("[realtime] assignProjectToSession set", projectId);
+
+        try {
+          const projectBundle = await convex.query(api.projects.getProject, {
+            projectId: projectId as Id<"projects">,
+          });
+          if (projectBundle?.project) {
+            ingestProjects([
+              {
+                project: projectBundle.project,
+                blueprint: projectBundle.blueprint ?? null,
+              },
+            ]);
+          }
+        } catch (projectError) {
+          console.error(
+            "[realtime] assignProjectToSession getProject failed",
+            projectError,
+          );
+        }
       } catch (assignError) {
         console.error("Failed to assign project to session", assignError);
         throw assignError;
       }
     },
-    [assignProjectMutation, language, sessionRecord],
+    [assignProjectMutation, convex, ingestProjects, language, sessionRecord],
   );
 
   const resolveMessageId = useCallback(
@@ -1452,6 +1658,61 @@ const resolveProjectId = useCallback(
     [pushSystemMessage],
   );
 
+  const handleToolProgressEvent = useCallback(
+    (payload: unknown) => {
+      if (!payload || typeof payload !== "object") return;
+      const record = payload as Record<string, unknown>;
+      if (
+        typeof record.tool === "string" &&
+        record.tool !== "queue_draft_update"
+      ) {
+        return;
+      }
+      const summaryText = coerceOptionalString(record.summary) ?? null;
+      const statusRaw = coerceOptionalString(record.status)?.toLowerCase() ?? "queued";
+      const status: DraftProgressStateStatus = [
+        "queued",
+        "running",
+        "complete",
+        "error",
+      ].includes(statusRaw)
+        ? (statusRaw as DraftProgressStateStatus)
+        : "queued";
+      const jobIdValue = coerceOptionalString(record.jobId);
+      const timestamp =
+        typeof record.timestamp === "number" && Number.isFinite(record.timestamp)
+          ? record.timestamp
+          : Date.now();
+      const errorText =
+        status === "error" ? coerceOptionalString(record.error) ?? null : null;
+      const eventKey = `${jobIdValue ?? "unknown"}:${status}:${summaryText ?? ""}:${timestamp}`;
+      if (lastProgressEventRef.current === eventKey) {
+        return;
+      }
+      lastProgressEventRef.current = eventKey;
+
+      setDraftProgress({
+        status,
+        jobId: jobIdValue ?? null,
+        summary: summaryText,
+        error: errorText,
+        updatedAt: timestamp,
+      });
+
+      const instructionStatus: Exclude<DraftProgressStateStatus, "idle"> =
+        status === "idle" ? "queued" : (status as Exclude<DraftProgressStateStatus, "idle">);
+
+      updateInstructionContext({
+        latestDraftUpdate: {
+          status: instructionStatus,
+          summary: summaryText,
+          updatedAt: timestamp,
+        },
+      });
+    },
+    [setDraftProgress, updateInstructionContext],
+  );
+
   const handleToolCall = useCallback(
     async ({
       id: toolCallId,
@@ -1465,14 +1726,16 @@ const resolveProjectId = useCallback(
       const args = toolArgs ?? {};
       const argCount = Object.keys(args).length;
 
-      if (name !== "list_projects" && argCount === 0) {
+      const toolName = normalizeToolName(name);
+
+      if (!TOOLS_ALLOWING_EMPTY_ARGS.has(toolName) && argCount === 0) {
         console.log(`[realtime] tool:${name} awaiting arguments`, {
           rawArguments,
         });
         return false;
       }
 
-      if (name === "create_project") {
+      if (toolName === "create_project") {
         const titleReady = typeof args.title === "string" && args.title.trim().length > 0;
         const typeReady =
           typeof args.contentType === "string" && args.contentType.trim().length > 0;
@@ -1493,20 +1756,31 @@ const resolveProjectId = useCallback(
         return false;
       }
 
-      if (
-        instructionContext.mode === "ghostwriting" &&
-        BLOCKED_TOOLS_IN_GHOSTWRITING.has(name)
-      ) {
-        console.log(
-          `[realtime] tool:${name} blocked during ghostwriting mode`,
-          args,
+      const allowedTools = getToolsForMode(instructionContext.mode);
+      const allowedToolNames = new Set(
+        allowedTools.map((tool) => normalizeToolName(tool.name)),
+      );
+
+      if (!allowedToolNames.has(toolName)) {
+        console.error(
+          `[realtime] TOOL BLOCKED: ${name} in ${instructionContext.mode} mode`,
+          {
+            tool: name,
+            mode: instructionContext.mode,
+            allowedTools: allowedTools.map((t) => t.name),
+            args,
+          },
         );
+        const reason =
+          instructionContext.mode === "ghostwriting"
+            ? `Tool "${name}" is disabled in ghostwriting mode. Use manage_outline for structure changes and queue_draft_update for content.`
+            : `Tool "${name}" is unavailable in ${instructionContext.mode} mode.`;
         const submitted = await submitToolResult({
           tool: name,
           tool_call_id: toolCallId,
           response_id: responseId,
           success: false,
-          error: `Tool ${name} is unavailable after drafting begins`,
+          error: reason,
         });
         return submitted;
       }
@@ -1523,9 +1797,15 @@ const resolveProjectId = useCallback(
       };
 
       try {
-        switch (name) {
+        switch (toolName) {
           case "list_projects": {
-            console.log("[realtime] tool:list_projects", { args });
+            console.log("[realtime] tool:list_projects", {
+              args,
+              mode: instructionContext.mode,
+              WARNING: instructionContext.mode === "ghostwriting"
+                ? "list_projects should NOT be called in ghostwriting mode!"
+                : null,
+            });
             const limit = clampInteger(args.limit, 20, 1, 50);
             const entries = await convex.query(api.projects.listProjects, {
               limit,
@@ -1737,13 +2017,20 @@ const resolveProjectId = useCallback(
               throw new Error("content is required for create_note");
             }
 
+            // GRACEFUL TRANSCRIPT ANCHORING:
+            // Only include message IDs that are explicitly mapped
+            // If transcript IDs haven't been persisted yet, skip them silently
             const messageIds = new Set<Id<"messages">>();
+            const unresolvedIds: string[] = [];
+
             const pushMessageId = (value: unknown) => {
               const idString = coerceIdString(value);
               if (idString) {
                 const mapped = resolveMessagePointer(idString);
                 if (mapped) {
                   messageIds.add(mapped);
+                } else {
+                  unresolvedIds.push(idString);
                 }
               }
             };
@@ -1761,6 +2048,8 @@ const resolveProjectId = useCallback(
               const mapped = resolveMessagePointer(idString);
               if (mapped) {
                 messageIds.add(mapped);
+              } else {
+                unresolvedIds.push(idString);
               }
             };
 
@@ -1770,6 +2059,14 @@ const resolveProjectId = useCallback(
               }
             }
             mapTranscript(args.transcriptId);
+
+            // Log warning but don't fail - transcript IDs are async
+            if (unresolvedIds.length > 0) {
+              console.warn(
+                `[realtime] create_note: ${unresolvedIds.length} transcript IDs not yet persisted (will be linked later)`,
+                { unresolvedIds: unresolvedIds.slice(0, 3) },
+              );
+            }
 
             const confidenceValue =
               typeof args.confidence === "number" &&
@@ -1782,6 +2079,7 @@ const resolveProjectId = useCallback(
               args.todoStatus ?? args.status,
             );
 
+            // Only pass sourceMessageIds if we have valid ones
             const created = await createNoteMutation({
               projectId,
               sessionId:
@@ -1817,7 +2115,6 @@ const resolveProjectId = useCallback(
             break;
           }
           case "record_transcript_pointer": {
-            console.log("[realtime] tool:record_transcript_pointer", { args });
             const projectId = resolveProjectId(args) as Id<"projects">;
             const sessionIdValue =
               sessionRecord?.sessionId ?? sessionIdRef.current;
@@ -1825,6 +2122,7 @@ const resolveProjectId = useCallback(
               throw new Error("Session id required for record_transcript_pointer");
             }
             let messageId: Id<"messages"> | null = null;
+            let itemPointer: string | null = null;
             const argRecord = args as Record<string, unknown>;
 
             const pointerCandidates = new Set<string>();
@@ -1878,23 +2176,36 @@ const resolveProjectId = useCallback(
               }
             }
 
-            for (const pointer of pointerCandidates) {
+            const pointerList = Array.from(pointerCandidates);
+            if (pointerList.length > 0) {
+              itemPointer = pointerList[0] ?? null;
+            }
+
+            for (const pointer of pointerList) {
               const resolved = resolveMessagePointer(pointer);
               if (resolved) {
                 messageId = resolved;
+                itemPointer = pointer;
                 break;
               }
             }
 
-            if (!messageId) {
-              throw new Error(
-                "messageId or transcriptId is required and must reference a known transcript",
+            // GRACEFUL: If nothing resolved yet, just skip this tool call
+            // The pointer will be linkable later when transcript persists
+            if (!messageId && !itemPointer) {
+              console.warn(
+                `[realtime] record_transcript_pointer: No IDs resolved yet (transcript still persisting)`,
+                { pointerList: pointerList.slice(0, 3) },
               );
+              result = { skipped: true, reason: "transcript_not_persisted_yet" };
+              success = true;
+              break;
             }
             const blueprint = await recordTranscriptPointerMutation({
               projectId,
               sessionId: sessionIdValue,
-              messageId,
+              messageId: messageId ?? (itemPointer as string | undefined),
+              itemId: itemPointer ?? undefined,
             });
             result = makeProjectToolResult({
               project: null,
@@ -1911,6 +2222,137 @@ const resolveProjectId = useCallback(
               projectId: projectId as Id<"projects">,
             });
             result = workspace;
+            success = true;
+            break;
+          }
+          case "manage_outline": {
+            console.log("[realtime] tool:manage_outline", { args });
+            const projectId = resolveProjectId(args) as Id<"projects">;
+            const operations = Array.isArray(args.operations) ? args.operations : [];
+            const updated = await convex.mutation(api.documents.manageOutline, {
+              projectId,
+              operations: operations.map((op: Record<string, unknown>) => ({
+                action: op.action as "add" | "rename" | "reorder" | "remove",
+                heading: op.heading as string,
+                newHeading: op.newHeading as string | undefined,
+                position: op.position as number | undefined,
+                status: op.status as "drafting" | "needs_detail" | "complete" | undefined,
+              })),
+            });
+            result = {
+              projectId,
+              operations: updated.operations,
+              sections: updated.sections.map((s: Record<string, unknown>) => ({
+                heading: s.heading,
+                status: s.status,
+                order: s.order,
+              })),
+            };
+            success = true;
+            break;
+          }
+          case "queue_draft_update": {
+            console.log("[realtime] tool:queue_draft_update", { args });
+            const projectId = resolveProjectId(args) as Id<"projects">;
+            const urgencyValue = coerceOptionalString(args.urgency);
+            const rawPointerArray =
+              coerceStringArray(args.messagePointers ?? args.message_pointers) ??
+              [];
+            const rawAnchorArray =
+              coerceStringArray(
+                args.transcriptAnchors ?? args.transcript_anchors,
+              ) ?? [];
+            const promptContextValue = coercePromptContext(
+              args.promptContext ?? args.context,
+            );
+
+            const pointerSet = new Set<string>();
+            const anchorSet = new Set<string>(rawAnchorArray);
+            const unresolvedPointers: string[] = [];
+
+            for (const pointer of rawPointerArray) {
+              const resolved = resolveMessagePointer(pointer);
+              if (resolved) {
+                pointerSet.add(resolved);
+              } else {
+                anchorSet.add(pointer);
+                unresolvedPointers.push(pointer);
+              }
+            }
+
+            // Log but don't fail - unresolved pointers go to transcriptAnchors
+            if (unresolvedPointers.length > 0) {
+              console.warn(
+                `[realtime] queue_draft_update: ${unresolvedPointers.length} transcript IDs not yet persisted (keeping as anchors)`,
+                { unresolvedPointers: unresolvedPointers.slice(0, 3) },
+              );
+            }
+
+            const messagePointersPayload =
+              pointerSet.size > 0 ? Array.from(pointerSet) : undefined;
+            const transcriptAnchorsPayload =
+              anchorSet.size > 0 ? Array.from(anchorSet) : undefined;
+            const sessionIdValue =
+              sessionRecord?.sessionId ?? sessionIdRef.current;
+            if (!sessionIdValue) {
+              throw new Error("sessionId is required to queue a draft update");
+            }
+            const acceptedAt = Date.now();
+            void (async () => {
+              try {
+                const job = await enqueueDraftUpdateMutation({
+                  projectId,
+                  sessionId: sessionIdValue,
+                  summary: undefined,
+                  urgency:
+                    typeof urgencyValue === "string" ? urgencyValue : undefined,
+                  messagePointers: messagePointersPayload,
+                  transcriptAnchors: transcriptAnchorsPayload,
+                  promptContext: promptContextValue,
+                });
+                await emitSystemJsonMessage("TOOL_PROGRESS", {
+                  tool: name,
+                  tool_call_id: toolCallId,
+                  status: "queued",
+                  projectId,
+                  jobId: job?._id ?? null,
+                  summary: null,
+                  urgency: job?.urgency ?? null,
+                  createdAt: job?.createdAt ?? acceptedAt,
+                });
+                try {
+                  await convex.action(api.documents.processDraftQueue, {});
+                } catch (processError) {
+                  console.error(
+                    "[realtime] queue_draft_update processDraftQueue failed",
+                    processError,
+                  );
+                }
+              } catch (progressError) {
+                console.error(
+                  "[realtime] queue_draft_update async failure",
+                  progressError,
+                );
+                await emitSystemJsonMessage("TOOL_PROGRESS", {
+                  tool: name,
+                  tool_call_id: toolCallId,
+                  status: "error",
+                  projectId,
+                  error:
+                    progressError instanceof Error
+                      ? progressError.message
+                      : String(progressError),
+                });
+              }
+            })();
+
+            result = {
+              status: "queued",
+              projectId,
+              acceptedAt,
+              summary: null,
+              urgency: urgencyValue ?? null,
+            };
             success = true;
             break;
           }
@@ -1935,12 +2377,14 @@ const resolveProjectId = useCallback(
                 const updated = await applyDocumentEditsMutation({
                   projectId,
                   markdown: markdownValue,
-                  sections: sectionPayload.map((section) => ({
-                    heading: section.heading,
-                    content: section.content,
-                    status: section.status,
-                    order: section.order,
-                  })),
+                  sections: sectionPayload.map(
+                    (section: DocumentEditSectionPayload) => ({
+                      heading: section.heading,
+                      content: section.content,
+                      status: section.status,
+                      order: section.order,
+                    }),
+                  ),
                   summary:
                     typeof summaryValue === "string" ? summaryValue : undefined,
                 });
@@ -1950,7 +2394,7 @@ const resolveProjectId = useCallback(
                   status: "completed",
                   projectId,
                   updatedAt: Date.now(),
-                  sections: updated.sections.map((section) => ({
+                  sections: updated.sections.map((section: (typeof updated.sections)[number]) => ({
                     heading: section.heading,
                     status: section.status,
                     order: section.order,
@@ -2009,6 +2453,7 @@ const resolveProjectId = useCallback(
     [
       assignProjectToSession,
       applyDocumentEditsMutation,
+      enqueueDraftUpdateMutation,
       commitBlueprintMutation,
       convex,
       createProjectToolMutation,
@@ -2135,17 +2580,129 @@ const resolveProjectId = useCallback(
             assistantFragmentsRef.current.delete(key);
             break;
           }
-          case "conversation.item.created": {
-            if (event.item?.type === "message") {
-              const role = event.item.role;
-              if (role === "user" || role === "assistant") {
-                const key = `${role}-${event.item.id ?? eventId}`;
-                const text = extractText(event.item.content);
-                await finalizeTranscript(
-                  role === "user" ? "user" : "assistant",
-                  key,
-                  text,
-                );
+          case "conversation.item.created":
+          case "conversation.item.added":
+          case "conversation.item.done": {
+            if (event.item) {
+              const itemRecord = event.item as Record<string, unknown>;
+              const role =
+                typeof itemRecord.role === "string" ? itemRecord.role : null;
+              const itemId =
+                typeof itemRecord.id === "string" && itemRecord.id.trim()
+                  ? (itemRecord.id as string)
+                  : eventId;
+              const previousItemId = (() => {
+                const snake = itemRecord.previous_item_id;
+                if (typeof snake === "string" && snake.trim()) {
+                  return snake;
+                }
+                const camel = (itemRecord as Record<string, unknown>)
+                  .previousItemId;
+                return typeof camel === "string" && camel.trim() ? camel : null;
+              })();
+              const itemType =
+                typeof itemRecord.type === "string" ? itemRecord.type : null;
+              const itemStatus =
+                typeof itemRecord.status === "string" ? itemRecord.status : null;
+              const createdAt = (() => {
+                const snake = itemRecord.created_at;
+                if (typeof snake === "number") return snake;
+                const camel = (itemRecord as Record<string, unknown>).createdAt;
+                if (typeof camel === "number") return camel;
+                return Date.now();
+              })();
+
+              if (itemRecord.type === "message") {
+                if (role === "user" || role === "assistant") {
+                  const key = `${role}-${itemId}`;
+                  const text = extractText(itemRecord.content)?.trim();
+                  await finalizeTranscript(
+                    role === "user" ? "user" : "assistant",
+                    key,
+                    text,
+                    {
+                      itemId,
+                      previousItemId,
+                      itemType,
+                      itemStatus,
+                      payload: event.item,
+                      createdAt,
+                    },
+                  );
+                } else if (role === "system") {
+                  const text = extractText(itemRecord.content)?.trim();
+                  if (text && text.startsWith("TOOL_PROGRESS::")) {
+                    const jsonPayload = text.slice("TOOL_PROGRESS::".length);
+                    try {
+                      const parsed = JSON.parse(jsonPayload);
+                      handleToolProgressEvent(parsed);
+                    } catch (progressError) {
+                      console.warn(
+                        "Failed to parse TOOL_PROGRESS payload",
+                        progressError,
+                        {
+                          jsonPayload,
+                        },
+                      );
+                    }
+                  }
+
+                  const sessionIdValue =
+                    sessionRecord?.sessionId ?? sessionIdRef.current;
+                  const projectIdValue =
+                    sessionRecord?.projectId ?? projectIdRef.current;
+                  if (projectIdValue && sessionIdValue) {
+                    try {
+                      await saveTranscriptChunkMutation({
+                        projectId: projectIdValue,
+                        sessionId: sessionIdValue,
+                        item: {
+                          id: itemId,
+                          type: itemType ?? "message",
+                          status: itemStatus ?? undefined,
+                          role: "system",
+                          previousItemId: previousItemId ?? undefined,
+                          payload: event.item,
+                          createdAt,
+                        },
+                      });
+                    } catch (chunkError) {
+                      console.error(
+                        "Failed to persist system transcript chunk",
+                        chunkError,
+                        { itemId },
+                      );
+                    }
+                  }
+                }
+              } else {
+                const sessionIdValue =
+                  sessionRecord?.sessionId ?? sessionIdRef.current;
+                const projectIdValue =
+                  sessionRecord?.projectId ?? projectIdRef.current;
+                if (projectIdValue && sessionIdValue) {
+                  try {
+                    await saveTranscriptChunkMutation({
+                      projectId: projectIdValue,
+                      sessionId: sessionIdValue,
+                      item: {
+                        id: itemId,
+                        type: itemType ?? undefined,
+                        status: itemStatus ?? undefined,
+                        role: role ?? undefined,
+                        previousItemId: previousItemId ?? undefined,
+                        payload: event.item,
+                        createdAt,
+                      },
+                    });
+                  } catch (chunkError) {
+                    console.error(
+                      "Failed to persist transcript chunk", chunkError, {
+                        itemId,
+                      },
+                    );
+                  }
+                }
               }
             }
             break;
@@ -2184,7 +2741,9 @@ const resolveProjectId = useCallback(
     [
       finalizeTranscript,
       handleToolCall,
+      handleToolProgressEvent,
       logConnection,
+      saveTranscriptChunkMutation,
       sessionRecord,
       updateRealtimeMutation,
     ],
@@ -2240,6 +2799,7 @@ const resolveProjectId = useCallback(
         createdSession.projectId ?? options?.projectId ?? null;
       completeOnceRef.current = false;
       sessionIdRef.current = createdSession.sessionId;
+      projectIdRef.current = assignedProjectId ?? null;
       console.log("[realtime] startSession created", createdSession);
       setSessionRecord({
         sessionId: createdSession.sessionId,
@@ -2250,6 +2810,24 @@ const resolveProjectId = useCallback(
       });
       setLanguageState(createdSession.language ?? language);
 
+      if (assignedProjectId) {
+        try {
+          const projectBundle = await convex.query(api.projects.getProject, {
+            projectId: assignedProjectId as Id<"projects">,
+          });
+          if (projectBundle?.project) {
+            ingestProjects([
+              {
+                project: projectBundle.project,
+                blueprint: projectBundle.blueprint ?? null,
+              },
+            ]);
+          }
+        } catch (projectError) {
+          console.error("[realtime] startSession getProject failed", projectError);
+        }
+      }
+
       const secretResponse = await fetch("/api/realtime/secret", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2258,6 +2836,7 @@ const resolveProjectId = useCallback(
           language,
           hasProjectContext: Boolean(assignedProjectId),
           mode: instructionContext.mode,
+          turnDetection,
         }),
       });
 
@@ -2400,12 +2979,15 @@ const resolveProjectId = useCallback(
     }
   }, [
     audioElementRef,
+    convex,
     createSessionMutation,
     handleServerEvent,
+    ingestProjects,
     instructionContext.mode,
     language,
     logConnection,
     noiseReduction,
+    turnDetection,
     selectedInputDeviceId,
     selectedOutputDeviceId,
     status,
@@ -2433,12 +3015,44 @@ const resolveProjectId = useCallback(
       const languageOption = findLanguageOption(language);
       const hasProjectContext =
         instructionContext.mode !== "intake" || Boolean(sessionRecord?.projectId);
-      const sessionUpdate: Record<string, unknown> = {};
+      const realtimeModel =
+        process.env.NEXT_PUBLIC_OPENAI_REALTIME_MODEL ?? "gpt-realtime";
+      const transcriptionModel =
+        process.env.NEXT_PUBLIC_OPENAI_TRANSCRIPTION_MODEL ?? "whisper-1";
+
+      const sessionUpdate: Record<string, unknown> = {
+        type: "realtime",
+        model: realtimeModel,
+        audio: {
+          input: {
+            format: { type: "audio/pcm", rate: 24_000 },
+            transcription: { model: transcriptionModel },
+          },
+        },
+      };
 
       if (noiseReduction && noiseReduction !== "default") {
-        sessionUpdate.audio = {
-          input: { noise_reduction: { type: noiseReduction } },
-        };
+        const audioConfig =
+          (sessionUpdate.audio as Record<string, unknown>) ?? {};
+        const inputConfig = (audioConfig.input as Record<string, unknown>) ?? {};
+        inputConfig.noise_reduction = { type: noiseReduction };
+        audioConfig.input = inputConfig;
+        sessionUpdate.audio = audioConfig;
+      }
+
+      if (turnDetection) {
+        sessionUpdate.turn_detection =
+          turnDetection.type === "semantic_vad"
+            ? {
+                type: "semantic_vad",
+                eagerness: turnDetection.eagerness,
+              }
+            : {
+                type: "server_vad",
+                threshold: turnDetection.threshold,
+                prefix_padding_ms: turnDetection.prefix_padding_ms,
+                silence_duration_ms: turnDetection.silence_duration_ms,
+              };
       }
 
       const toolDefinitions = getToolsForMode(instructionContext.mode);
@@ -2454,6 +3068,7 @@ const resolveProjectId = useCallback(
         mode: instructionContext.mode,
         blueprintSummary: instructionContext.blueprintSummary,
         draftingSnapshot: instructionContext.draftingSnapshot,
+        latestDraftUpdate: instructionContext.latestDraftUpdate ?? undefined,
       });
       if (instructions && instructions !== lastInstructionRef.current) {
         sessionUpdate.instructions = instructions;
@@ -2468,8 +3083,18 @@ const resolveProjectId = useCallback(
               session: sessionUpdate,
             }),
           );
-          if (sessionUpdate.audio) {
+          if (noiseReduction && noiseReduction !== "default") {
             logConnection(`Noise reduction set to ${noiseReduction}`);
+          }
+          if (turnDetection) {
+            const turnLabel =
+              TURN_DETECTION_OPTIONS.find(
+                (option) => option.value === turnDetectionPreset,
+              )?.label ??
+              (turnDetection.type === "semantic_vad"
+                ? `Semantic (${turnDetection.eagerness ?? "auto"})`
+                : "Server VAD");
+            logConnection(`Turn detection configured: ${turnLabel}`);
           }
           if (sessionUpdate.instructions) {
             const contextLabel = hasProjectContext
@@ -2502,6 +3127,8 @@ const resolveProjectId = useCallback(
     language,
     logConnection,
     noiseReduction,
+    turnDetection,
+    turnDetectionPreset,
     sessionRecord?.sessionId,
     sessionRecord?.projectId,
     setNoiseProfileMutation,
@@ -2563,17 +3190,23 @@ const resolveProjectId = useCallback(
       selectOutputDevice,
       noiseReduction,
       setNoiseReduction,
+      turnDetection,
+      turnDetectionPreset,
+      setTurnDetectionPreset,
       language,
       setLanguage,
       languageOptions: LANGUAGE_OPTIONS,
       microphoneLevel,
       assistantLevel,
       voiceActivity,
+      isMuted,
+      toggleMute,
       transcripts,
       partialUserTranscript,
       partialAssistantTranscript,
       connectionLog,
       serverEvents,
+      draftProgress,
       error,
       sendTextMessage,
       registerAudioElement,
@@ -2609,18 +3242,24 @@ const resolveProjectId = useCallback(
       sendTextMessage,
       startSession,
       setLanguage,
+      setTurnDetectionPreset,
       status,
       statusMessage,
       stopSession,
       transcripts,
       voiceActivity,
+      isMuted,
+      toggleMute,
       microphoneLevel,
       serverEvents,
       setNoiseReduction,
+      turnDetection,
+      turnDetectionPreset,
       resolveMessageId,
       updateInstructionContext,
+      draftProgress,
     ],
   );
 }
 
-export { NOISE_REDUCTION_OPTIONS };
+export { NOISE_REDUCTION_OPTIONS, TURN_DETECTION_OPTIONS };

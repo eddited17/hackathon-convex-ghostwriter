@@ -15,12 +15,25 @@ import {
 
 type NoiseReduction = "default" | "near_field" | "far_field";
 
+type TurnDetectionPayload =
+  | {
+      type: "semantic_vad";
+      eagerness?: "low" | "medium" | "high" | "auto";
+    }
+  | {
+      type: "server_vad";
+      threshold?: number;
+      prefix_padding_ms?: number;
+      silence_duration_ms?: number;
+    };
+
 type SecretRequest = {
   noiseReduction?: NoiseReduction;
   voice?: string;
   language?: string;
   hasProjectContext?: boolean;
   mode?: SessionInstructionMode;
+  turnDetection?: TurnDetectionPayload;
 };
 
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/realtime/client_secrets";
@@ -77,44 +90,93 @@ export async function POST(request: Request) {
     : hasProjectContext
       ? "blueprint"
       : "intake";
-  const sessionConfig: Record<string, unknown> = {
-    type: "realtime",
-    model: DEFAULT_MODEL,
-    audio: {
+  const tools = getInitialToolList({
+    mode: resolvedMode,
+    hasProjectContext,
+  });
+  const instructions = buildSessionInstructions({
+    language: selectedLanguage,
+    hasProjectContext,
+    mode: resolvedMode,
+  });
+
+  const buildSessionConfig = (includeTurnDetection: boolean) => {
+    const audioConfig: Record<string, unknown> = {
       output: {
         voice: payload.voice ?? DEFAULT_VOICE,
       },
-    },
-    instructions: buildSessionInstructions({
-      language: selectedLanguage,
-      hasProjectContext,
-      mode: resolvedMode,
-    }),
-    tools: getInitialToolList({
-      mode: resolvedMode,
-      hasProjectContext,
-    }),
-  };
-
-  if (payload.noiseReduction && payload.noiseReduction !== "default") {
-    (sessionConfig.audio as Record<string, unknown>).input = {
-      noise_reduction: { type: payload.noiseReduction },
     };
-  }
 
-  const requestBody: Record<string, unknown> = {
-    session: sessionConfig,
+    if (payload.noiseReduction && payload.noiseReduction !== "default") {
+      audioConfig.input = {
+        noise_reduction: { type: payload.noiseReduction },
+      };
+    }
+
+    const sessionConfig: Record<string, unknown> = {
+      type: "realtime",
+      model: DEFAULT_MODEL,
+      audio: audioConfig,
+      instructions,
+      tools,
+    };
+
+    if (includeTurnDetection && payload.turnDetection) {
+      sessionConfig.turn_detection =
+        payload.turnDetection.type === "semantic_vad"
+          ? {
+              type: "semantic_vad",
+              eagerness: payload.turnDetection.eagerness,
+            }
+          : {
+              type: "server_vad",
+              threshold: payload.turnDetection.threshold,
+              prefix_padding_ms: payload.turnDetection.prefix_padding_ms,
+              silence_duration_ms: payload.turnDetection.silence_duration_ms,
+            };
+    }
+
+    return sessionConfig;
   };
 
-  try {
-    const response = await fetch(OPENAI_ENDPOINT, {
+  const createClientSecret = async (sessionConfig: Record<string, unknown>) => {
+    return fetch(OPENAI_ENDPOINT, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({ session: sessionConfig }),
     });
+  };
+
+  try {
+    const includeTurnDetection = Boolean(payload.turnDetection);
+    let response = await createClientSecret(
+      buildSessionConfig(includeTurnDetection),
+    );
+
+    if (!response.ok && payload.turnDetection) {
+      const detail = await response.text();
+      console.warn(
+        "[realtime] turn_detection rejected during secret creation; retrying without custom config",
+        {
+          status: response.status,
+          detail,
+        },
+      );
+      response = await createClientSecret(buildSessionConfig(false));
+      if (!response.ok) {
+        const fallbackDetail = await response.text();
+        return NextResponse.json(
+          {
+            error: "Failed to create realtime client secret",
+            detail: fallbackDetail,
+          },
+          { status: response.status },
+        );
+      }
+    }
 
     if (!response.ok) {
       const detail = await response.text();

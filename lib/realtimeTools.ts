@@ -138,11 +138,8 @@ const TOOL_DEFINITIONS: Record<string, RealtimeToolDefinition> = {
           enum: [
             "desiredOutcome",
             "targetAudience",
-            "publishingPlan",
-            "timeline",
             "materialsInventory",
             "communicationPreferences",
-            "budgetRange",
             "voiceGuardrails",
           ],
           description: "Blueprint field identifier to update.",
@@ -371,7 +368,7 @@ const TOOL_DEFINITIONS: Record<string, RealtimeToolDefinition> = {
     type: "function",
     name: "apply_document_edits",
     description:
-      "Persist a whole-document Markdown update plus ordered section metadata so the live draft stays in sync across clients.",
+      "Persist a whole-document Markdown update plus ordered section metadata so the live draft stays in sync across clients. Use this to manage the outline—add, rename, reorder, or remove sections and set their status (e.g. mark fresh placeholders as needs_detail).",
     parameters: {
       type: "object",
       properties: {
@@ -408,6 +405,105 @@ const TOOL_DEFINITIONS: Record<string, RealtimeToolDefinition> = {
       additionalProperties: false,
     },
   },
+  queue_draft_update: {
+    type: "function",
+    name: "queue_draft_update",
+    description:
+      "Request a background drafting pass for the active project. Prefer sending only transcript/message pointers, promptContext.activeSection, and promptContext.feedback (revision bullets); leave `summary` empty unless explicitly instructed to provide one.\n\nPreamble & Flow:\n- Speak BEFORE calling this tool (e.g., \"I'll update that section now\", \"Adding that to the draft\", \"Got it, working on that\")\n- After calling, IMMEDIATELY continue the conversation—ask follow-up questions, move to next topic, or wrap up naturally\n- The draft processes asynchronously; you'll get TOOL_PROGRESS later (informational only, don't wait for it)",
+    parameters: {
+      type: "object",
+      properties: {
+        projectId: {
+          type: "string",
+          description: "Project id whose draft should be updated in the background.",
+        },
+        urgency: {
+          type: "string",
+          description:
+            "Relative urgency for the draft update (e.g. asap, routine).",
+        },
+        summary: {
+          type: "string",
+          description:
+            "Optional summary of the new insights that should influence the draft.",
+        },
+        messagePointers: {
+          type: "array",
+          description:
+            "Array of transcript or message pointers (ids/tags) that ground the update. Use resolve_transcript_pointer outputs or known message ids.",
+          items: {
+            type: "string",
+          },
+        },
+        transcriptAnchors: {
+          type: "array",
+          description:
+            "Conversation item ids that should be highlighted for transcript excerpts when the drafter composes the update.",
+          items: {
+            type: "string",
+          },
+        },
+        promptContext: {
+          type: "object",
+          description:
+            "Structured context (key-value map) capturing additional drafting signals (e.g. outline targets, priority sections, narration instructions). Set `activeSection` to the heading you want the drafter to update.",
+          additionalProperties: true,
+        },
+      },
+      required: ["projectId"],
+      additionalProperties: false,
+    },
+  },
+  manage_outline: {
+    type: "function",
+    name: "manage_outline",
+    description:
+      "Lightweight outline management: add, rename, reorder, or remove sections. IMPORTANT: Each section is ONE top-level heading only (no nested subheadings). Subheadings must be their own sections if the user wants to manage them separately. Sections are added to the bottom by default unless position is specified. The drafter fills content via queue_draft_update.\n\nPreamble & Flow:\n- Speak BEFORE calling this tool (e.g., \"I'll add that section\", \"Restructuring the outline\", \"Let me adjust that\")\n- After calling, IMMEDIATELY continue talking—don't pause or wait",
+    parameters: {
+      type: "object",
+      properties: {
+        projectId: {
+          type: "string",
+          description: "Project id whose outline should be updated.",
+        },
+        operations: {
+          type: "array",
+          description: "Ordered list of outline operations to apply atomically.",
+          items: {
+            type: "object",
+            properties: {
+              action: {
+                type: "string",
+                enum: ["add", "rename", "reorder", "remove"],
+                description: "Type of operation: add (new section at bottom or specified position), rename (change heading), reorder (move to new position), remove (delete section).",
+              },
+              heading: {
+                type: "string",
+                description: "Section heading to operate on. Must be a single headline without subheadings. For add: the new heading. For rename: the current heading. For remove/reorder: the target heading.",
+              },
+              newHeading: {
+                type: "string",
+                description: "For rename action only: the new heading text.",
+              },
+              position: {
+                type: "number",
+                description: "For add/reorder actions: zero-indexed position (0=first, 1=second, etc). Omit to add at the bottom.",
+              },
+              status: {
+                type: "string",
+                enum: SECTION_STATUS_ENUM,
+                description: "For add action: initial status (defaults to needs_detail).",
+              },
+            },
+            required: ["action", "heading"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["projectId", "operations"],
+      additionalProperties: false,
+    },
+  },
 };
 
 const MODE_VALUES: SessionInstructionMode[] = [
@@ -431,7 +527,6 @@ const TOOLSET_BY_MODE: Record<SessionInstructionMode, string[]> = {
     "update_project_metadata",
     "sync_blueprint_field",
     "commit_blueprint",
-    "assign_project_to_session",
     "list_notes",
     "list_todos",
     "create_note",
@@ -441,15 +536,14 @@ const TOOLSET_BY_MODE: Record<SessionInstructionMode, string[]> = {
   ],
   ghostwriting: [
     "get_project",
-    "update_project_metadata",
-    "sync_blueprint_field",
     "list_notes",
     "list_todos",
     "create_note",
     "update_todo_status",
     "record_transcript_pointer",
     "get_document_workspace",
-    "apply_document_edits",
+    "manage_outline",
+    "queue_draft_update",
   ],
 };
 
@@ -471,7 +565,7 @@ export function getInitialToolList({
     return getToolsForMode(mode);
   }
   if (hasProjectContext) {
-    return getToolsForMode("blueprint");
+    return getToolsForMode("ghostwriting");
   }
   return getToolsForMode("intake");
 }

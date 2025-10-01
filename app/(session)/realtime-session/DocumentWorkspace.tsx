@@ -5,6 +5,7 @@ import { useMutation, useQuery } from "convex/react";
 
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import type { SessionInstructionMode } from "@/lib/realtimeInstructions";
 import type { BlueprintFieldState } from "./useProjectIntakeFlow";
 
 const SECTION_STATUS_LABELS: Record<string, string> = {
@@ -20,6 +21,25 @@ const NOTE_LABELS: Record<string, string> = {
   voice: "Voice",
   todo: "TODO",
   summary: "Summary",
+};
+
+type RealtimeDraftStatus = {
+  status: "idle" | "queued" | "running" | "complete" | "error";
+  summary: string | null;
+  error: string | null;
+  updatedAt: number | null;
+};
+
+const MODE_LABELS: Record<SessionInstructionMode, string> = {
+  intake: "Intake setup",
+  blueprint: "Blueprint refinement",
+  ghostwriting: "Draft orchestration",
+};
+
+const MODE_CLASSES: Record<SessionInstructionMode, string> = {
+  intake: "mode-intake",
+  blueprint: "mode-blueprint",
+  ghostwriting: "mode-ghostwriting",
 };
 
 const formatDateTime = (timestamp: number | undefined) => {
@@ -135,6 +155,8 @@ type DocumentWorkspaceProps = {
       status: "drafting" | "needs_detail" | "complete";
     }>;
   }) => void;
+  realtimeStatus?: RealtimeDraftStatus;
+  mode: SessionInstructionMode;
 };
 
 export default function DocumentWorkspace({
@@ -142,9 +164,15 @@ export default function DocumentWorkspace({
   blueprint,
   fieldStates,
   onSnapshot,
+  realtimeStatus,
+  mode,
 }: DocumentWorkspaceProps) {
   const workspace = useQuery(
     api.documents.getWorkspace,
+    projectId ? { projectId } : "skip",
+  );
+  const draftQueueState = useQuery(
+    api.documents.getDraftQueueState,
     projectId ? { projectId } : "skip",
   );
   const notes = useQuery(
@@ -166,10 +194,54 @@ export default function DocumentWorkspace({
 
   const openTodoCount = useMemo(() => {
     if (!todos) return 0;
-    return todos.filter((todo) => todo.status !== "resolved").length;
+    return todos.filter((todo: Doc<"todos">) => todo.status !== "resolved").length;
   }, [todos]);
 
   const [resetting, setResetting] = useState(false);
+
+  const activeJob = draftQueueState?.activeJob ?? null;
+  const latestJob = draftQueueState?.jobs?.[0] ?? null;
+  const jobStatus = activeJob?.status ?? latestJob?.status ?? null;
+  const liveStatus = useMemo<RealtimeDraftStatus | null>(() => {
+    if (!realtimeStatus || realtimeStatus.status === "idle") return null;
+    if (
+      typeof realtimeStatus.updatedAt === "number" &&
+      Date.now() - realtimeStatus.updatedAt > 60_000
+    ) {
+      return null;
+    }
+    return realtimeStatus;
+  }, [realtimeStatus]);
+  const effectiveStatus = (liveStatus?.status ?? jobStatus ?? null) as
+    | RealtimeDraftStatus["status"]
+    | null;
+  const jobStatusLabel =
+    effectiveStatus === "queued"
+      ? "Draft queued"
+      : effectiveStatus === "running"
+        ? "Drafting…"
+        : effectiveStatus === "complete"
+          ? "Draft ready"
+          : effectiveStatus === "error"
+            ? "Draft error"
+            : null;
+  const jobStatusClass =
+    effectiveStatus === "complete"
+      ? "status-complete"
+      : effectiveStatus === "error"
+        ? "status-needs_detail"
+        : "status-drafting";
+  const jobErrorMessage =
+    liveStatus?.error ??
+    draftQueueState?.jobs?.find(
+      (job: Doc<"draftJobs">) => job.status === "error" && job.error?.trim(),
+    )?.error ?? null;
+  const realtimeSummary = liveStatus?.summary ?? null;
+  const transcriptStatusLabel = draftQueueState?.latestTranscript
+    ? draftQueueState.latestTranscript.finalizedAt
+      ? "Transcript saved"
+      : "Transcript recording"
+    : null;
 
   const handleResetDraft = async () => {
     if (!projectId || resetting) return;
@@ -189,7 +261,10 @@ export default function DocumentWorkspace({
 
   useEffect(() => {
     if (!workspace || !onSnapshot) return;
-    const sections = workspace.progress.sectionStatuses.map((section) => ({
+    const sections = workspace.progress.sectionStatuses.map((section: {
+      heading: string;
+      status: "drafting" | "needs_detail" | "complete";
+    }) => ({
       title: section.heading,
       status: section.status,
     }));
@@ -237,6 +312,8 @@ export default function DocumentWorkspace({
   const draftSummary = workspace?.document?.summary?.trim() ?? "";
   const sections = workspace?.sections ?? [];
   const noteCount = notes?.length ?? 0;
+  const modeChipLabel = MODE_LABELS[mode];
+  const modeChipClass = MODE_CLASSES[mode];
   const blueprintSummary =
     blueprintHighlights.length > 0
       ? `${completedHighlights}/${blueprintHighlights.length} blueprint fields`
@@ -260,17 +337,43 @@ export default function DocumentWorkspace({
               <p className="panel-description">
                 Updates arrive as the assistant applies whole-document edits.
               </p>
+              {realtimeSummary ? (
+                <p className="panel-description">
+                  Latest update: {realtimeSummary}
+                </p>
+              ) : null}
+              {jobErrorMessage ? (
+                <p className="panel-description">
+                  Background drafting error: {jobErrorMessage}
+                </p>
+              ) : null}
             </div>
             <div className="draft-header-tools">
               <div className="draft-metrics">
+                <span className={`metric-chip ${modeChipClass}`}>
+                  {modeChipLabel}
+                </span>
                 <span className="metric-chip">
                   {workspace ? `${workspace.progress.wordCount} words` : "—"}
                 </span>
+                {jobStatusLabel ? (
+                  <span
+                    className={`metric-chip ${jobStatusClass}`}
+                    title={jobErrorMessage ?? undefined}
+                  >
+                    {jobStatusLabel}
+                  </span>
+                ) : null}
                 <span
                   className={`metric-chip status-${workspace?.document?.status ?? "drafting"}`}
                 >
                   {workspace?.document?.status ?? "drafting"}
                 </span>
+                {transcriptStatusLabel ? (
+                  <span className="metric-chip subtle">
+                    {transcriptStatusLabel}
+                  </span>
+                ) : null}
                 {workspace?.document?.updatedAt ? (
                   <span className="metric-chip subtle">
                     Updated {formatDateTime(workspace.document.updatedAt)}
@@ -310,7 +413,7 @@ export default function DocumentWorkspace({
             </header>
             {todos && todos.length > 0 ? (
               <ul className="todo-list">
-                {todos.map((todo) => (
+                {todos.map((todo: Doc<"todos">) => (
                   <li key={todo._id} className={`todo-item status-${todo.status}`}>
                     <div>
                       <p>{todo.label}</p>
@@ -390,7 +493,7 @@ export default function DocumentWorkspace({
                   </p>
                 ) : (
                   <ol className="outline-list">
-                    {sections.map((section) => (
+                    {sections.map((section: Doc<"documentSections">) => (
                       <li key={section._id}>
                         <div>
                           <span className="outline-title">{section.heading}</span>
@@ -437,7 +540,7 @@ export default function DocumentWorkspace({
                 <h3>Recent notes</h3>
                 {notes && notes.length > 0 ? (
                   <ul className="note-list">
-                    {notes.map((note) => (
+                    {notes.map((note: Doc<"notes">) => (
                       <li key={note._id}>
                         <div>
                           <span className={`note-type type-${note.noteType}`}>
