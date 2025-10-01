@@ -11,9 +11,7 @@ import {
 } from "@/lib/projects";
 
 import type { Id } from "@/convex/_generated/dataModel";
-import {
-  type RealtimeSessionState,
-} from "./useRealtimeSession";
+import "./useRealtimeSession";
 import { useProjectIntakeFlow } from "./useProjectIntakeFlow";
 import { useRealtimeSessionContext } from "./RealtimeSessionProvider";
 import DynamicDocumentView from "./DynamicDocumentView";
@@ -24,14 +22,6 @@ const formatTime = (timestamp: number) =>
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(timestamp);
-
-const formatDate = (timestamp: number) =>
-  new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
   }).format(timestamp);
 
 type DraftSnapshot = {
@@ -55,8 +45,6 @@ export default function RealtimeSessionShell({
   const router = useRouter();
   const {
     status,
-    startSession,
-    stopSession,
     transcripts,
     draftProgress,
     error,
@@ -76,8 +64,6 @@ export default function RealtimeSessionShell({
     blueprint,
     fieldStates,
     activeFieldKey,
-    beginConversation,
-    beginProjectSession,
     setActiveFieldKey: focusBlueprintField,
     updateField,
     updateVoiceGuardrails,
@@ -90,7 +76,6 @@ export default function RealtimeSessionShell({
   } = useProjectIntakeFlow({
     transcripts,
     status,
-    startSession,
     sendTextMessage,
     sessionRecord,
     assignProjectToSession,
@@ -102,7 +87,6 @@ export default function RealtimeSessionShell({
     initialProjectId: projectId ?? null,
   });
 
-  const [manualMessage, setManualMessage] = useState("");
   const [fieldDrafts, setFieldDrafts] = useState<
     Partial<Record<BlueprintFieldKey, string>>
   >({});
@@ -228,6 +212,7 @@ export default function RealtimeSessionShell({
   );
 
   const selectedProjectId = activeProject?._id ?? sessionRecord?.projectId ?? null;
+  const hasExplicitProjectContext = Boolean(projectId ?? selectedProjectId);
 
   const blueprintProgress = fieldStates.filter((field) => field.isComplete).length;
   const blueprintTotal = fieldStates.length;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -12,38 +12,28 @@ export default function ProjectsListView() {
   const session = useRealtimeSessionContext();
   const router = useRouter();
   const lastRoutedProjectIdRef = useRef<string | null>(null);
-  const [isStartingSession, setIsStartingSession] = useState(false);
 
   const {
-    phase,
     projects,
     isLoadingProjects,
-    beginConversation,
-    chooseExistingMode,
     clearProject,
   } = useProjectIntakeFlow({
     transcripts: session.transcripts,
     status: session.status,
-    startSession: session.startSession,
     sendTextMessage: session.sendTextMessage,
     sessionRecord: session.sessionRecord,
     assignProjectToSession: session.assignProjectToSession,
     resolveMessageId: session.resolveMessageId,
-    ingestProjects: session.ingestProjects,
     onNavigateToProject: (projectId) => {
       router.push(`/projects/${projectId}`);
     },
   });
 
-  const isConnecting =
-    session.status === "connecting" || session.status === "requesting-permissions";
-  const isSessionActive = session.status === "connected" || session.status === "connecting";
-
   const audioRef = useCallback(
     (element: HTMLAudioElement | null) => {
       session.registerAudioElement(element);
     },
-    [session.registerAudioElement],
+    [session],
   );
 
   // Set intake mode and clear project state when projects list is loaded
@@ -56,7 +46,8 @@ export default function ProjectsListView() {
       draftingSnapshot: undefined,
       latestDraftUpdate: undefined,
     });
-  }, [clearProject, session.updateInstructionContext]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clearProject]);
 
   useEffect(() => {
     const activeProjectId = session.sessionRecord?.projectId ?? null;
@@ -68,6 +59,7 @@ export default function ProjectsListView() {
     lastRoutedProjectIdRef.current = activeProjectId;
     console.log("[projects] routing to active project", activeProjectId);
     router.push(`/projects/${activeProjectId}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router, session.sessionRecord?.projectId]);
 
   return (

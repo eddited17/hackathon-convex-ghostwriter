@@ -19,7 +19,6 @@ import type { TranscriptionFragment } from "@/lib/realtimeAudio";
 import type {
   RealtimeSessionState,
   SessionStatus,
-  StartSessionOptions,
 } from "./useRealtimeSession";
 
 type IntakePhase =
@@ -306,7 +305,6 @@ const detectProjectByText = (
 interface UseProjectIntakeFlowOptions {
   transcripts: TranscriptionFragment[];
   status: SessionStatus;
-  startSession: (options?: StartSessionOptions) => Promise<void>;
   sendTextMessage: RealtimeSessionState["sendTextMessage"];
   sessionRecord: RealtimeSessionState["sessionRecord"];
   assignProjectToSession: RealtimeSessionState["assignProjectToSession"];
@@ -355,7 +353,6 @@ export interface ProjectIntakeState {
 export function useProjectIntakeFlow({
   transcripts,
   status,
-  startSession,
   sendTextMessage,
   sessionRecord,
   assignProjectToSession,
@@ -465,16 +462,16 @@ export function useProjectIntakeFlow({
   }, [activeProject, isProjectDetailLoading, selectedProjectId]);
 
   const ensureSessionForProject = useCallback(
-    async (projectId: Id<"projects">, options?: StartSessionOptions) => {
+    async (projectId: Id<"projects">) => {
       if (status === "connected" && sessionRecord?.sessionId) {
         if (sessionRecord.projectId !== projectId) {
           await assignProjectToSession(projectId);
         }
         return;
       }
-      await startSession({ projectId, ...options });
+      // Session not active - project will be assigned on next start
     },
-    [assignProjectToSession, sessionRecord, startSession, status],
+    [assignProjectToSession, sessionRecord, status],
   );
 
   const beginConversation = useCallback(async () => {
@@ -488,13 +485,12 @@ export function useProjectIntakeFlow({
     setActiveProject(null);
     setBlueprint(null);
     setBlueprintBypassed(false);
-    await startSession({ deferProject: true });
     setPhase("mode-selection");
     await sendTextMessage(
-      "Let’s begin! Greet the user warmly and ask if they’d like to create a new project or continue an existing one.",
+      "Let's begin! Greet the user warmly and ask if they'd like to create a new project or continue an existing one.",
       { skipPersist: true },
     );
-  }, [sendTextMessage, startSession]);
+  }, [sendTextMessage]);
 
   const startNewProject = useCallback(async () => {
     if (modeIntent !== "new") {
@@ -734,11 +730,6 @@ export function useProjectIntakeFlow({
 
   const missingBlueprintFields = useMemo(
     () => fieldStates.filter((field) => !field.isComplete && !field.optional),
-    [fieldStates],
-  );
-
-  const blueprintHasAnyCapturedValue = useMemo(
-    () => fieldStates.some((field) => field.isComplete),
     [fieldStates],
   );
 
@@ -1030,6 +1021,7 @@ export function useProjectIntakeFlow({
       });
       void openProject(match.project._id);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openProject, phase, projectsList, transcripts]);
 
   useEffect(() => {
@@ -1113,6 +1105,7 @@ export function useProjectIntakeFlow({
     if (skipIntent) {
       void skipBlueprint();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blueprintBypassed, needsBlueprint, phase, skipBlueprint, transcripts]);
 
   useEffect(() => {

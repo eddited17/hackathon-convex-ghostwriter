@@ -11,15 +11,6 @@ import {
 import { useRealtimeSessionContext } from "./RealtimeSessionProvider";
 import { NOISE_REDUCTION_OPTIONS, TURN_DETECTION_OPTIONS } from "./useRealtimeSession";
 
-const STATUS_LABELS: Record<string, string> = {
-  idle: "Idle",
-  "requesting-permissions": "Requesting permissions",
-  connecting: "Connecting",
-  connected: "Connected",
-  ended: "Ended",
-  error: "Error",
-};
-
 const MODE_LABELS: Record<string, string> = {
   intake: "Intake",
   blueprint: "Blueprint",
